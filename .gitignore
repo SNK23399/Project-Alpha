@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Data files (large, user-specific)
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.parquet
+*.csv
+
+# Results and outputs (generated)
+results/
+*.pkl
+*.pickle
+
+# Environment and secrets
+.env
+.env.*
+*.env
+credentials.*
+secrets.*
+
+# Claude Code
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# LaTeX auxiliary files (paper/)
+paper/**/*.aux
+paper/**/*.bbl
+paper/**/*.blg
+paper/**/*.fdb_latexmk
+paper/**/*.fls
+paper/**/*.log
+paper/**/*.out
+paper/**/*.synctex.gz
+paper/**/*.toc
+paper/render/
+
+# Keep paper source but not generated
+!paper/main.tex
+!paper/references.bib
+!paper/chapters/
+!paper/figures/
+!paper/tables/

@@ -1,0 +1,44 @@
+\appendix
+\section*{Appendix: Signal Framework Details}
+\label{sec:appendix}
+
+This appendix provides complete documentation of the signal framework used for ETF selection. The framework consists of three stages: signal base computation, smoothing filter application, and indicator transformation.
+
+\subsection*{Signal Bases}
+
+Tables~\ref{tab:signal-bases} and \ref{tab:signal-bases-2} list all 95 signal bases computed from raw price data. Each signal captures a different aspect of ETF behavior relative to the core benchmark (ACWI). Signals are organized into categories: returns and alpha, relative strength, risk metrics, risk-adjusted performance, trend indicators, mean reversion signals, higher moments, correlation, momentum dynamics, signal disagreement, regime-adaptive signals, and seasonality.
+
+\input{tables/signal_bases}
+
+\subsection*{Smoothing Filters}
+
+Table~\ref{tab:filters} describes the 14 causal smoothing filter types (24 configurations with different parameters) applied to each signal base. All filters are strictly causal---they only use past data at each time step, ensuring no look-ahead bias in the backtest. The filters range from simple exponential moving averages to adaptive filters (KAMA, regime-switching) and sophisticated signal processing methods (Kalman, Butterworth, Savitzky-Golay).
+
+\input{tables/filters}
+
+\subsection*{Indicator Transformations}
+
+Table~\ref{tab:indicators} documents the 25 indicator transformations applied to filtered signals. These indicators capture different temporal and cross-sectional aspects of signal behavior, including momentum at multiple horizons, z-scores, trend ratios, mean reversion, velocity, acceleration, and volatility ratios.
+
+\input{tables/indicators}
+
+\subsection*{Feature Space Summary}
+
+Combining all components yields the complete feature space:
+
+\begin{itemize}
+    \item \textbf{Signal Bases}: 95 fundamental signals
+    \item \textbf{Smoothing Filters}: 24 causal filter configurations (including raw)
+    \item \textbf{Indicators}: 25 transformations
+    \item \textbf{Total Features}: $95 \times 24 \times 25 = 57{,}000$
+\end{itemize}
+
+Each feature is named using the convention: \texttt{signal\_\_filter\_\_indicator}, for example \texttt{vol\_boosted\_reversion\_\_hull\_63d\_\_xs\_rank}.
+
+The GPU-accelerated computation pipeline processes all 57,000 features efficiently using:
+\begin{itemize}
+    \item CuPy for parallel computation on NVIDIA GPUs
+    \item Streaming mode to limit memory usage
+    \item Disk caching for rolling statistics to avoid redundant computation
+    \item Vectorized operations for signal bases and indicators
+\end{itemize}
