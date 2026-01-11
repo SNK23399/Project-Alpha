@@ -11,7 +11,7 @@ import sys
 import time
 import io
 import logging
-import getpass
+import msvcrt  # Windows for masked password input
 
 from degiro_connector.trading.api import API as TradingAPI
 from degiro_connector.trading.models.credentials import Credentials
@@ -19,6 +19,52 @@ from degiro_connector.core.exceptions import DeGiroConnectionError
 
 # Suppress noisy debug output from degiro_connector
 logging.getLogger("degiro_connector").setLevel(logging.WARNING)
+
+
+def get_clipboard():
+    """Get text from Windows clipboard."""
+    import ctypes
+    CF_UNICODETEXT = 13
+
+    ctypes.windll.user32.OpenClipboard(0)
+    try:
+        if ctypes.windll.user32.IsClipboardFormatAvailable(CF_UNICODETEXT):
+            data = ctypes.windll.user32.GetClipboardData(CF_UNICODETEXT)
+            text = ctypes.c_wchar_p(data).value
+            return text if text else ""
+        return ""
+    finally:
+        ctypes.windll.user32.CloseClipboard()
+
+
+def masked_input(prompt=""):
+    """Get password input showing * for each character (Windows). Supports paste with Ctrl+V."""
+    print(prompt, end='', flush=True)
+    password = []
+    while True:
+        char = msvcrt.getch()
+        if char in (b'\r', b'\n'):  # Enter pressed
+            print()  # New line
+            break
+        elif char == b'\x08':  # Backspace
+            if password:
+                password.pop()
+                # Move cursor back, overwrite with space, move back again
+                print('\b \b', end='', flush=True)
+        elif char == b'\x03':  # Ctrl+C
+            raise KeyboardInterrupt
+        elif char == b'\x16':  # Ctrl+V (paste)
+            clipboard = get_clipboard()
+            if clipboard:
+                # Add clipboard content and show * for each char
+                for c in clipboard:
+                    if c not in ('\r', '\n'):  # Skip newlines
+                        password.append(c)
+                        print('*', end='', flush=True)
+        else:
+            password.append(char.decode('utf-8', errors='ignore'))
+            print('*', end='', flush=True)
+    return ''.join(password)
 
 # Singleton instance
 _client_instance = None
@@ -63,20 +109,12 @@ class DegiroClient:
         print()
 
         username = input("Username: ").strip()
-        password = getpass.getpass("Password: ")
-
-        # Optional TOTP
-        totp_secret = None
-        totp_input = getpass.getpass("TOTP Secret (press Enter to skip): ")
-        if totp_input.strip():
-            totp_secret = totp_input.strip()
-
+        password = masked_input("Password: ")
         print()
 
         credentials = Credentials(
             username=username,
             password=password,
-            totp_secret_key=totp_secret if totp_secret else None,
         )
 
         print("=" * 80)

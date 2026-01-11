@@ -15,7 +15,6 @@ import pandas as pd
 import numpy as np
 
 from support.etf_database import ETFDatabase
-from support.signal_database import SignalDatabase
 from signal_bases_optimized_full import compute_all_signal_bases
 
 # Note: Using optimized version with parallelization (5-8x faster)
@@ -45,9 +44,9 @@ def compute_and_save_signal_bases(
     print("STEP 1: COMPUTE SIGNAL BASES")
     print("=" * 80)
 
-    # Initialize databases
+    # Initialize ETF database (for reading price data)
     db = ETFDatabase("data/etf_database.db")
-    signal_db = SignalDatabase("data/etf_database.db")
+    # Note: Signals saved to separate database: data/signal_database.db
 
     # Determine date range
     if end_date is None:
@@ -120,37 +119,82 @@ def compute_and_save_signal_bases(
         save_signals_3d = signals_3d
         print(f"\n  Full mode: Saving all {len(save_dates)} days")
 
-    # Save to database (processes one signal at a time to avoid memory issues)
+    # Save to database - ONE SIGNAL AT A TIME using fast pandas method
     print("\n" + "-" * 80)
-    print("Saving to database (one signal at a time)...")
+    print("Saving to database (fast per-signal method)...")
     print("-" * 80)
 
-    save_start = time.time()
-    n_records = signal_db.update_signal_bases(
-        save_signals_3d,
-        signal_names,
-        save_dates,
-        list(etf_prices.columns),
-        replace=(not incremental)
-    )
-    save_time = time.time() - save_start
+    import sqlite3
 
+    save_start = time.time()
+    n_records = 0
+    n_signals = len(signal_names)
+    isins = list(etf_prices.columns)
+
+    # Connect directly for fast pandas to_sql
+    conn = sqlite3.connect("data/signal_database.db")
+
+    # Create table if not exists
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS signal_bases (
+            signal_name TEXT,
+            isin TEXT,
+            date TEXT,
+            value REAL,
+            PRIMARY KEY (signal_name, isin, date)
+        )
+    """)
+
+    # Delete existing if replacing
+    if not incremental:
+        print("  Clearing existing signal data...")
+        conn.execute("DELETE FROM signal_bases")
+        conn.commit()
+
+    # Save each signal using fast pandas method
+    dates_str = save_dates.strftime('%Y-%m-%d')
+
+    for sig_idx, signal_name in enumerate(signal_names):
+        # Get this signal as DataFrame
+        signal_2d = save_signals_3d[sig_idx]  # (n_time, n_etfs)
+
+        # Convert to long format DataFrame (fast with pandas melt)
+        df = pd.DataFrame(signal_2d, index=dates_str, columns=isins)
+        df.index.name = 'date'
+        df_long = df.reset_index().melt(id_vars='date', var_name='isin', value_name='value')
+        df_long['signal_name'] = signal_name
+
+        # Drop NaN values
+        df_long = df_long.dropna(subset=['value'])
+
+        # Reorder columns
+        df_long = df_long[['signal_name', 'isin', 'date', 'value']]
+
+        # Fast insert using pandas (much faster than executemany)
+        df_long.to_sql('signal_bases', conn, if_exists='append', index=False, method='multi')
+
+        n_records += len(df_long)
+
+        # Progress update
+        if (sig_idx + 1) % 10 == 0:
+            elapsed = time.time() - save_start
+            rate = (sig_idx + 1) / elapsed
+            eta = (n_signals - sig_idx - 1) / rate if rate > 0 else 0
+            print(f"    [Saved {sig_idx + 1}/{n_signals} signals... ETA: {eta:.0f}s]")
+
+    # Create index for fast queries
+    print("  Creating index...")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_name_date ON signal_bases(signal_name, date)")
+    conn.commit()
+    conn.close()
+
+    save_time = time.time() - save_start
     print(f"  Saved {n_records:,} records in {save_time:.1f}s")
     if save_time > 0:
         print(f"  Records per second: {n_records / save_time:,.0f}")
 
     # Log computation
     total_time = time.time() - signal_start
-
-    signal_db.log_computation(
-        computation_type="signal_bases_incremental" if incremental else "signal_bases_full",
-        start_date=str(save_dates[0].date()),
-        end_date=str(save_dates[-1].date()),
-        n_etfs=len(etf_prices.columns),
-        n_signals=len(signal_names),
-        computation_time=total_time,
-        notes=f"Computed {len(signal_names)} signal bases"
-    )
 
     # Summary
     print("\n" + "=" * 80)
@@ -168,12 +212,12 @@ def compute_and_save_signal_bases(
     print("=" * 80)
 
     # Show database stats
-    stats = signal_db.get_stats()
-    print(f"\nDatabase state after update:")
-    print(f"  Total signal base records: {stats['signal_base_records']:,}")
-    print(f"  Unique signals: {stats['unique_signal_bases']}")
-    print(f"  Date range: {stats['signal_date_range']}")
-    print(f"  Database size: {stats['db_size_mb']:.1f} MB")
+    import os
+    db_size = os.path.getsize("data/signal_database.db") / (1024 * 1024)
+    print(f"\nDatabase: data/signal_database.db")
+    print(f"  Size: {db_size:.1f} MB")
+    print(f"  Signals: {len(signal_names)}")
+    print(f"  Records: {n_records:,}")
 
     return {
         'mode': 'incremental' if incremental else 'full',

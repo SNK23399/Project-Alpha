@@ -36,31 +36,52 @@ import numpy as np
 class ETFDatabase:
     """SQLite database for ETF universe and price data."""
 
-    def __init__(self, db_path: str = "data/etf_database.db"):
+    def __init__(self, db_path: str = "data/etf_database.db", readonly: bool = True):
         """
         Initialize database connection.
 
         Args:
             db_path: Path to SQLite database file
+            readonly: If True (default), open in read-only mode (prevents accidental writes).
+                      Set to False explicitly to enable write operations.
         """
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
 
-        self._init_schema()
+        if not readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get database connection with optimized settings."""
-        conn = sqlite3.connect(self.db_path)
+        if self.readonly:
+            # Open in read-only mode using URI
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path)
+            # Optimize for bulk inserts (only in write mode)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        # Enable foreign key enforcement (industry standard)
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
-        # Optimize for bulk inserts
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
         return conn
+
+    def _check_writable(self):
+        """Raise error if database is in read-only mode."""
+        if self.readonly:
+            raise PermissionError(
+                "Database is open in read-only mode. "
+                "Use ETFDatabase(db_path, readonly=False) to enable writes."
+            )
 
     def _init_schema(self):
         """Initialize database schema if not exists."""
         conn = self._get_connection()
         try:
+            # Enable auto-vacuum for automatic space reclamation
+            conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+
             # ETF metadata table (current values)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS etfs (
@@ -82,34 +103,39 @@ class ETFDatabase:
             # ETF metadata history table (track changes over time)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS etf_metadata_history (
-                    isin TEXT,
-                    snapshot_date TEXT,
+                    isin TEXT NOT NULL,
+                    snapshot_date TEXT NOT NULL,
                     ter REAL,
                     fund_size REAL,
                     months_of_data INTEGER,
                     PRIMARY KEY (isin, snapshot_date),
-                    FOREIGN KEY (isin) REFERENCES etfs(isin)
+                    FOREIGN KEY (isin) REFERENCES etfs(isin) ON DELETE CASCADE
                 )
             """)
 
-            # Price data table
+            # Price data table with NOT NULL constraints for data integrity
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS prices (
-                    isin TEXT,
-                    date TEXT,
-                    price REAL,
+                    isin TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    price REAL NOT NULL,
                     PRIMARY KEY (isin, date),
-                    FOREIGN KEY (isin) REFERENCES etfs(isin)
+                    FOREIGN KEY (isin) REFERENCES etfs(isin) ON DELETE CASCADE
                 )
             """)
 
-            # Index for faster price queries
+            # Composite index for the most common query pattern: prices by ISIN and date range
+            # This is more efficient than separate indexes for range queries
             conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_prices_isin ON prices(isin)
+                CREATE INDEX IF NOT EXISTS idx_prices_isin_date ON prices(isin, date)
             """)
+
+            # Index for date-only queries (e.g., "all prices on a specific date")
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_prices_date ON prices(date)
             """)
+
+            # Index for metadata history lookups
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_metadata_history_isin ON etf_metadata_history(isin)
             """)
@@ -151,6 +177,7 @@ class ETFDatabase:
         Returns:
             True if added, False if updated existing
         """
+        self._check_writable()
         conn = self._get_connection()
         try:
             # Check if exists
@@ -225,6 +252,7 @@ class ETFDatabase:
         Returns:
             True if removed, False if not found
         """
+        self._check_writable()
         conn = self._get_connection()
         try:
             # Delete prices first (foreign key)
@@ -298,6 +326,7 @@ class ETFDatabase:
         Returns:
             Number of price records added/updated
         """
+        self._check_writable()
         if prices is None or len(prices) == 0:
             return 0
 
@@ -451,6 +480,7 @@ class ETFDatabase:
         Args:
             snapshot_date: Date for snapshot (default: today)
         """
+        self._check_writable()
         if snapshot_date is None:
             snapshot_date = datetime.now().strftime('%Y-%m-%d')
 
@@ -593,10 +623,98 @@ class ETFDatabase:
             conn.close()
 
     def vacuum(self):
-        """Optimize database file size."""
+        """Optimize database file size (full rebuild)."""
+        self._check_writable()
         conn = self._get_connection()
         try:
             conn.execute("VACUUM")
+        finally:
+            conn.close()
+
+    def optimize(self):
+        """
+        Run maintenance optimizations on the database.
+
+        Performs:
+        - Incremental vacuum (reclaim free pages)
+        - Analyze (update query planner statistics)
+        - Integrity check
+
+        Call this periodically (e.g., after monthly data updates).
+        """
+        self._check_writable()
+        conn = self._get_connection()
+        try:
+            # Incremental vacuum - reclaim free pages without full rebuild
+            conn.execute("PRAGMA incremental_vacuum")
+
+            # Update statistics for query optimizer
+            conn.execute("ANALYZE")
+
+            conn.commit()
+        finally:
+            conn.close()
+
+    def validate(self) -> Dict[str, Any]:
+        """
+        Validate database integrity and data consistency.
+
+        Returns:
+            Dict with validation results:
+            - integrity_ok: bool - SQLite integrity check passed
+            - orphan_prices: int - prices without matching ETF record
+            - etfs_without_prices: int - ETFs with no price data
+            - duplicate_prices: int - duplicate (isin, date) entries
+            - null_prices: int - NULL values in price column
+            - issues: list of issue descriptions
+        """
+        conn = self._get_connection()
+        try:
+            issues = []
+
+            # SQLite integrity check
+            integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+            integrity_ok = integrity == "ok"
+            if not integrity_ok:
+                issues.append(f"Integrity check failed: {integrity}")
+
+            # Check for orphan prices (prices without ETF record)
+            orphan_prices = conn.execute("""
+                SELECT COUNT(*) FROM prices p
+                WHERE NOT EXISTS (SELECT 1 FROM etfs e WHERE e.isin = p.isin)
+            """).fetchone()[0]
+            if orphan_prices > 0:
+                issues.append(f"{orphan_prices} orphan price records (no matching ETF)")
+
+            # Check for ETFs without prices
+            etfs_without_prices = conn.execute("""
+                SELECT COUNT(*) FROM etfs e
+                WHERE NOT EXISTS (SELECT 1 FROM prices p WHERE p.isin = e.isin)
+            """).fetchone()[0]
+            if etfs_without_prices > 0:
+                issues.append(f"{etfs_without_prices} ETFs have no price data")
+
+            # Check for NULL prices (shouldn't happen with NOT NULL constraint)
+            null_prices = conn.execute("""
+                SELECT COUNT(*) FROM prices WHERE price IS NULL
+            """).fetchone()[0]
+            if null_prices > 0:
+                issues.append(f"{null_prices} NULL price values found")
+
+            # Check foreign key violations
+            fk_violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if fk_violations:
+                issues.append(f"{len(fk_violations)} foreign key violations")
+
+            return {
+                'integrity_ok': integrity_ok,
+                'orphan_prices': orphan_prices,
+                'etfs_without_prices': etfs_without_prices,
+                'null_prices': null_prices,
+                'foreign_key_violations': len(fk_violations) if fk_violations else 0,
+                'issues': issues,
+                'valid': len(issues) == 0
+            }
         finally:
             conn.close()
 
@@ -620,7 +738,7 @@ if __name__ == "__main__":
     # Test the database
     print("ETF Database Test\n")
 
-    db = ETFDatabase("data/etf_database_test.db")
+    db = ETFDatabase("data/etf_database_test.db", readonly=False)
 
     # Add test ETF
     db.add_etf(

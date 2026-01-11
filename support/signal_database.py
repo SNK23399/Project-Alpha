@@ -191,34 +191,41 @@ class SignalDatabase:
                 )
                 conn.commit()
 
+            # Pre-compute coordinate arrays (reused for each signal) - only ~40MB
+            time_indices, etf_indices = np.meshgrid(
+                np.arange(n_time), np.arange(n_etfs), indexing='ij'
+            )
+            time_flat = time_indices.ravel()
+            etf_flat = etf_indices.ravel()
+            isins_arr = np.array(isins)
+
             for sig_idx, signal_name in enumerate(signal_names):
-                # Get this signal's 2D array (n_time, n_etfs)
+                # Get this signal's 2D array and flatten
                 signal_2d = signals_3d[sig_idx]
+                values_flat = signal_2d.ravel()
 
-                # Build records for this signal only
-                records = []
-                for time_idx, date_str in enumerate(dates_arr):
-                    for etf_idx, isin in enumerate(isins):
-                        value = signal_2d[time_idx, etf_idx]
-                        if not np.isnan(value):
-                            records.append((signal_name, isin, date_str, float(value)))
+                # Filter out NaNs (vectorized - very fast)
+                valid_mask = ~np.isnan(values_flat)
+                valid_times = time_flat[valid_mask]
+                valid_etfs = etf_flat[valid_mask]
+                valid_values = values_flat[valid_mask]
 
-                        # Batch insert every 50000 records
-                        if len(records) >= 50000:
-                            conn.executemany("""
-                                INSERT OR REPLACE INTO signal_bases (signal_name, isin, date, value)
-                                VALUES (?, ?, ?, ?)
-                            """, records)
-                            total_records += len(records)
-                            records = []
+                # Build records using vectorized indexing
+                records = list(zip(
+                    [signal_name] * len(valid_values),
+                    isins_arr[valid_etfs],
+                    dates_arr[valid_times],
+                    valid_values
+                ))
 
-                # Insert remaining records for this signal
-                if records:
+                # Batch insert in chunks of 50000
+                for i in range(0, len(records), 50000):
+                    batch = records[i:i+50000]
                     conn.executemany("""
                         INSERT OR REPLACE INTO signal_bases (signal_name, isin, date, value)
                         VALUES (?, ?, ?, ?)
-                    """, records)
-                    total_records += len(records)
+                    """, batch)
+                    total_records += len(batch)
 
                 # Commit after each signal and print progress
                 conn.commit()

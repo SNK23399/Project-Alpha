@@ -29,8 +29,9 @@ import pandas as pd
 from tqdm import tqdm
 import justetf_scraping
 
-# Add support directory to path
-sys.path.insert(0, str(Path(__file__).parent / "support"))
+# Add parent directory to path (for support modules)
+sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent / "support"))
 
 from degiro_client import get_client
 from etf_database import ETFDatabase
@@ -67,7 +68,7 @@ def initialize_database(db_path="data/etf_database_new.db", update_mode=False):
     print(f"Database path: {db_path}")
     print()
 
-    db = ETFDatabase(db_path)
+    db = ETFDatabase(db_path, readonly=False)
 
     if update_mode:
         # Save metadata snapshot before updating
@@ -144,7 +145,7 @@ def add_etfs_to_database(db, df_universe):
     added_count = 0
     updated_count = 0
 
-    for _, row in tqdm(df_universe.iterrows(), total=len(df_universe), desc="Adding ETFs"):
+    for _, row in tqdm(df_universe.iterrows(), total=len(df_universe), desc="Adding ETFs", ncols=80):
         is_new = db.add_etf(
             isin=row['ISIN'],
             name=row['Name'],
@@ -186,7 +187,7 @@ def fetch_and_store_prices(db, df_universe):
     print(f"Filtering to dates >= {CORE_INCEPTION_DATE.date()}")
     print("(This may take several minutes)\n")
 
-    for isin in tqdm(isins, desc="Fetching prices"):
+    for isin in tqdm(isins, desc="Fetching prices", ncols=80):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -234,8 +235,8 @@ def fetch_and_store_prices(db, df_universe):
         except Exception as e:
             fail_count += 1
 
-        # Rate limiting for JustETF
-        time.sleep(0.3)
+        # Rate limiting for JustETF (0.5s to avoid rate limiting)
+        time.sleep(0.5)
 
     print(f"\n✓ Successfully fetched prices for {success_count}/{len(isins)} ETFs")
     if fail_count > 0:
@@ -292,7 +293,7 @@ def retry_failed_etfs(db, all_isins, initial_success):
     retry_success = 0
     retry_fail = 0
 
-    for isin in tqdm(no_data_isins, desc="Retrying"):
+    for isin in tqdm(no_data_isins, desc="Retrying", ncols=80):
         try:
             time.sleep(1.0)  # Longer delay for retry
 
@@ -341,7 +342,7 @@ def check_data_quality(db):
     quality_issues = []
     good_etfs = 0
 
-    for isin in tqdm(all_isins, desc="Checking quality"):
+    for isin in tqdm(all_isins, desc="Checking quality", ncols=80):
         prices = db.load_prices(isin)
         etf_info = db.get_etf(isin)
         name = etf_info['name'][:40] if etf_info else isin
@@ -439,9 +440,6 @@ def print_summary(db):
     print()
     print("✓ Data collection complete!")
     print()
-    print("Next steps:")
-    print("  1. Run 0_analyze_data_quality.py to verify data")
-    print("  2. Run 1_compute_signal_bases.py to compute signals")
     print("=" * 80)
 
 
@@ -475,7 +473,28 @@ def main():
         # 6. Check data quality
         check_data_quality(db)
 
-        # 7. Print summary
+        # 7. Optimize database
+        print("=" * 80)
+        print("OPTIMIZING DATABASE")
+        print("=" * 80)
+        print()
+        print("Running optimization (ANALYZE + incremental vacuum)...")
+        db.optimize()
+        print("✓ Database optimized")
+        print()
+
+        # 8. Validate database integrity
+        print("Validating database integrity...")
+        validation = db.validate()
+        if validation['valid']:
+            print("✓ Database validation passed")
+        else:
+            print("⚠ Database validation issues:")
+            for issue in validation['issues']:
+                print(f"  - {issue}")
+        print()
+
+        # 9. Print summary
         elapsed = time.time() - start_time
         print(f"Total time: {elapsed/60:.1f} minutes")
         print()

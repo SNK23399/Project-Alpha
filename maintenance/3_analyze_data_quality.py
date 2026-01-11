@@ -11,7 +11,7 @@ computing signal bases. It checks for:
 
 import sys
 from pathlib import Path
-sys.path.append(str(Path(__file__).parent / "support"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "support"))
 
 import pandas as pd
 import numpy as np
@@ -38,29 +38,48 @@ def analyze_data_quality(db_path="data/etf_database.db"):
     print(f"  Shape: {all_prices.shape}")
     print(f"  Memory: {all_prices.memory_usage(deep=True).sum() / 1e6:.1f} MB")
 
-    # 1. Missing Data Analysis
+    # 1. Missing Data Analysis (from each ETF's actual start date)
     print("\n" + "=" * 80)
     print("1. MISSING DATA ANALYSIS")
     print("=" * 80)
+    print("\n(Analyzing each ETF from its first available date, not from database start)")
 
-    missing_pct = (all_prices.isna().sum() / len(all_prices)) * 100
+    # Calculate missing % from each ETF's first non-null date
+    missing_from_start = {}
+    etf_start_dates = {}
+    for isin in all_prices.columns:
+        series = all_prices[isin].dropna()
+        if len(series) > 0:
+            start_date = series.index[0]
+            etf_start_dates[isin] = start_date
+            # Count trading days from start to end
+            etf_data = all_prices.loc[start_date:, isin]
+            total_days = len(etf_data)
+            missing_days = etf_data.isna().sum()
+            missing_from_start[isin] = (missing_days / total_days) * 100 if total_days > 0 else 0
+        else:
+            missing_from_start[isin] = 100.0
 
-    print(f"\nMissing data statistics:")
+    missing_pct = pd.Series(missing_from_start)
+
+    print(f"\nMissing data statistics (from each ETF's start date):")
     print(f"  Mean missing: {missing_pct.mean():.2f}%")
     print(f"  Median missing: {missing_pct.median():.2f}%")
     print(f"  Min missing: {missing_pct.min():.2f}%")
     print(f"  Max missing: {missing_pct.max():.2f}%")
 
-    # ETFs with excessive missing data (>50%)
-    high_missing = missing_pct[missing_pct > 50].sort_values(ascending=False)
+    # ETFs with excessive missing data (>10% from their start date is concerning)
+    high_missing = missing_pct[missing_pct > 10].sort_values(ascending=False)
     if len(high_missing) > 0:
-        print(f"\n[WARN] {len(high_missing)} ETFs with >50% missing data:")
+        print(f"\n[WARN] {len(high_missing)} ETFs with >10% missing data (from their start date):")
         for isin, pct in high_missing.head(10).items():
-            print(f"  {isin}: {pct:.1f}% missing")
+            start = etf_start_dates.get(isin, 'N/A')
+            start_str = start.strftime('%Y-%m-%d') if hasattr(start, 'strftime') else str(start)
+            print(f"  {isin}: {pct:.1f}% missing (since {start_str})")
         if len(high_missing) > 10:
             print(f"  ... and {len(high_missing) - 10} more")
     else:
-        print(f"\n[OK] No ETFs with >50% missing data")
+        print(f"\n[OK] No ETFs with >10% missing data from their start date")
 
     # Data coverage over time
     coverage_over_time = (~all_prices.isna()).sum(axis=1)
@@ -75,7 +94,7 @@ def analyze_data_quality(db_path="data/etf_database.db"):
     print("=" * 80)
 
     # Calculate daily returns
-    returns = all_prices.pct_change()
+    returns = all_prices.pct_change(fill_method=None)
 
     print(f"\nDaily return statistics:")
     print(f"  Mean: {returns.mean().mean():.4f}")

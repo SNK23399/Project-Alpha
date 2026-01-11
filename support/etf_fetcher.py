@@ -138,108 +138,140 @@ class ETFFetcher:
         if user_token:
             self.chart_fetcher = ChartFetcher(user_token=user_token)
 
-    def _load_justetf(self):
-        """Load JustETF overview data for enrichment."""
+    def _load_justetf(self, max_retries: int = 3):
+        """Load JustETF overview data for enrichment with retry logic."""
         if self._df_justetf is not None:
             return
 
         self._log("Loading JustETF data...")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", FutureWarning)
-            self._df_justetf = justetf_scraping.load_overview()
 
-        # Ensure ISIN is a column
-        if self._df_justetf.index.name and self._df_justetf.index.name.lower() == 'isin':
-            self._df_justetf = self._df_justetf.reset_index()
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FutureWarning)
+                    df = justetf_scraping.load_overview()
 
-        self._log(f"  Loaded {len(self._df_justetf)} ETFs from JustETF")
+                if df is not None and len(df) > 0:
+                    # Ensure ISIN is a column
+                    if df.index.name and df.index.name.lower() == 'isin':
+                        df = df.reset_index()
 
-    def _fetch_degiro_catalog(self) -> pd.DataFrame:
-        """Fetch complete ETF catalog from DEGIRO."""
+                    self._df_justetf = df
+                    self._log(f"  Loaded {len(self._df_justetf)} ETFs from JustETF")
+                    return
+                else:
+                    last_error = "Empty response from JustETF"
+
+            except Exception as e:
+                last_error = str(e)
+
+            if attempt < max_retries - 1:
+                self._log(f"  Retry {attempt + 1}/{max_retries} - JustETF load failed: {last_error}")
+                time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s
+
+        raise RuntimeError(f"Failed to load JustETF data after {max_retries} attempts: {last_error}")
+
+    def _fetch_degiro_catalog(self, max_retries: int = 3) -> pd.DataFrame:
+        """Fetch complete ETF catalog from DEGIRO with retry logic."""
         if self._df_degiro is not None:
             return self._df_degiro.copy()
 
         self._connect()
         self._log("Fetching DEGIRO ETF catalog...")
 
-        all_etfs = []
-        offset = 0
-        page_size = 100
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                all_etfs = []
+                offset = 0
+                page_size = 100
 
-        # Get initial page and total count
-        request = ETFsRequest(
-            popularOnly=False,
-            inputAggregateTypes="",
-            inputAggregateValues="",
-            searchText="",
-            offset=0,
-            limit=page_size,
-            requireTotal=True,
-            sortColumns="name",
-            sortTypes="asc",
-        )
+                # Get initial page and total count
+                request = ETFsRequest(
+                    popularOnly=False,
+                    inputAggregateTypes="",
+                    inputAggregateValues="",
+                    searchText="",
+                    offset=0,
+                    limit=page_size,
+                    requireTotal=True,
+                    sortColumns="name",
+                    sortTypes="asc",
+                )
 
-        result = self.api.product_search(product_request=request, raw=False)
-        all_etfs.extend(result.products)
-        total = getattr(result, 'total', None) or 10000
+                result = self.api.product_search(product_request=request, raw=False)
+                all_etfs.extend(result.products)
+                total = getattr(result, 'total', None) or 10000
 
-        offset = page_size
+                offset = page_size
 
-        # Fetch remaining pages
-        pbar = tqdm(
-            total=total,
-            initial=len(all_etfs),
-            desc="  Fetching",
-            unit=" ETFs",
-            disable=not self.verbose,
-            ncols=80
-        )
+                # Fetch remaining pages
+                pbar = tqdm(
+                    total=total,
+                    initial=len(all_etfs),
+                    desc="  Fetching",
+                    unit=" ETFs",
+                    disable=not self.verbose,
+                    ncols=80
+                )
 
-        while len(all_etfs) < total:
-            request = ETFsRequest(
-                popularOnly=False,
-                inputAggregateTypes="",
-                inputAggregateValues="",
-                searchText="",
-                offset=offset,
-                limit=page_size,
-                requireTotal=False,
-                sortColumns="name",
-                sortTypes="asc",
-            )
+                while len(all_etfs) < total:
+                    request = ETFsRequest(
+                        popularOnly=False,
+                        inputAggregateTypes="",
+                        inputAggregateValues="",
+                        searchText="",
+                        offset=offset,
+                        limit=page_size,
+                        requireTotal=False,
+                        sortColumns="name",
+                        sortTypes="asc",
+                    )
 
-            result = self.api.product_search(product_request=request, raw=False)
+                    result = self.api.product_search(product_request=request, raw=False)
 
-            if not result.products:
-                break
+                    if not result.products:
+                        break
 
-            all_etfs.extend(result.products)
-            pbar.update(len(result.products))
+                    all_etfs.extend(result.products)
+                    pbar.update(len(result.products))
 
-            if len(result.products) < page_size:
-                break
+                    if len(result.products) < page_size:
+                        break
 
-            offset += page_size
-            time.sleep(0.1)
+                    offset += page_size
+                    time.sleep(0.1)
 
-        pbar.close()
+                pbar.close()
 
-        # Convert to DataFrame
-        df = pd.DataFrame(all_etfs)
-        df['symbol'] = df['symbol'].str.strip()
+                # Convert to DataFrame
+                df = pd.DataFrame(all_etfs)
+                df['symbol'] = df['symbol'].str.strip()
 
-        # Map exchange names
-        df['exchangeId'] = df['exchangeId'].astype(int)
-        df['exchange'] = df['exchangeId'].map(EXCHANGE_MAP)
+                # Map exchange names
+                df['exchangeId'] = df['exchangeId'].astype(int)
+                df['exchange'] = df['exchangeId'].map(EXCHANGE_MAP)
 
-        # Clean up
-        df = df[df['vwdId'].notna()].copy()
-        df = df.drop_duplicates(subset=['vwdId'], keep='first')
+                # Clean up
+                df = df[df['vwdId'].notna()].copy()
+                df = df.drop_duplicates(subset=['vwdId'], keep='first')
 
-        self._df_degiro = df
-        self._log(f"  Found {len(df)} ETFs on DEGIRO")
+                # Sort by ISIN for deterministic ordering
+                df = df.sort_values('isin').reset_index(drop=True)
 
-        return df.copy()
+                self._df_degiro = df
+                self._log(f"  Found {len(df)} ETFs on DEGIRO")
+
+                return df.copy()
+
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries - 1:
+                    self._log(f"  Retry {attempt + 1}/{max_retries} - DEGIRO fetch failed: {last_error}")
+                    time.sleep(2 ** attempt)
+
+        raise RuntimeError(f"Failed to fetch DEGIRO catalog after {max_retries} attempts: {last_error}")
 
     def _get_justetf_months(self, isin: str) -> Optional[int]:
         """Get months of data available on JustETF for an ISIN."""
@@ -263,22 +295,24 @@ class ETFFetcher:
 
     def _deduplicate(self, df: pd.DataFrame, by_longest_history: bool = False) -> pd.DataFrame:
         """
-        Keep one listing per ISIN.
+        Keep one listing per ISIN with deterministic selection.
 
         Args:
             by_longest_history: If True, keep the vwdId with most months of data.
-                               If False, just keep first occurrence.
+                               If False, keep the one with lowest vwdId (deterministic).
         """
         df = df.copy()
 
         if by_longest_history and 'months_of_data' in df.columns:
-            # Sort by ISIN, then months_of_data descending (longest first)
+            # Sort by ISIN, then months_of_data descending (longest first),
+            # then vwdId ascending (tie-breaker for determinism)
             df = df.sort_values(
-                by=['isin', 'months_of_data'],
-                ascending=[True, False]
+                by=['isin', 'months_of_data', 'vwdId'],
+                ascending=[True, False, True]
             )
         else:
-            df = df.sort_values(by=['isin'])
+            # Sort by ISIN, then vwdId for deterministic selection
+            df = df.sort_values(by=['isin', 'vwdId'], ascending=[True, True])
 
         df = df.drop_duplicates(subset='isin', keep='first')
 
@@ -319,6 +353,8 @@ class ETFFetcher:
         dist_col = next((c for c in self._df_justetf.columns if c.lower() in ['dividends', 'dividend', 'distribution']), None)
         size_col = next((c for c in self._df_justetf.columns if 'size' in c.lower() or 'aum' in c.lower()), None)
 
+        before_justetf = df['isin'].nunique()
+
         if isin_col:
             justetf = self._df_justetf.set_index(isin_col)
             if dist_col:
@@ -328,7 +364,9 @@ class ETFFetcher:
 
         # Drop ETFs not in JustETF
         df = df[df['distribution'].notna()].copy()
-        self._log(f"  JustETF match: {df['isin'].nunique()} ETFs")
+        after_justetf = df['isin'].nunique()
+        dropped_justetf = before_justetf - after_justetf
+        self._log(f"  JustETF match: {after_justetf} ETFs (dropped {dropped_justetf} not in JustETF)")
 
         # Filter by distribution policy
         if filter.distribution:
@@ -358,29 +396,28 @@ class ETFFetcher:
         # Filter to numeric vwdIds only
         df = df[df['vwdId'].astype(str).str.match(r'^\d+$')].copy()
 
-        # Always fetch months of data from JustETF (expensive - requires API calls)
-        self._log(f"  Fetching data history from JustETF...")
-
-        isins = df['isin'].unique()
-        justetf_months = {}
-
-        for isin in tqdm(isins, desc="  Checking history", disable=not self.verbose, ncols=80):
-            justetf_months[isin] = self._get_justetf_months(isin)
-            time.sleep(0.3)  # Rate limiting for JustETF
-
-        df['months_of_data'] = df['isin'].map(justetf_months)
-
-        # Filter by months of data (optional)
+        # Only fetch months of data if min_months filter is set
+        # (otherwise we fetch all prices anyway in 1_collect_etf_data.py)
         if filter.min_months is not None:
+            self._log(f"  Fetching data history from JustETF...")
+
+            isins = df['isin'].unique()
+            justetf_months = {}
+
+            for isin in tqdm(isins, desc="  Checking history", disable=not self.verbose, ncols=80):
+                justetf_months[isin] = self._get_justetf_months(isin)
+                time.sleep(0.3)  # Rate limiting for JustETF
+
+            df['months_of_data'] = df['isin'].map(justetf_months)
             df = df[df['months_of_data'] >= filter.min_months].copy()
             self._log(f"  History >= {filter.min_months} months: {df['isin'].nunique()} ETFs")
 
         # Deduplicate (one listing per ISIN) - optional
         if filter.deduplicate:
             # If we have months_of_data, pick the vwdId with longest history
-            by_longest = 'months_of_data' in df.columns
+            by_longest = 'months_of_data' in df.columns and filter.min_months is not None
             df = self._deduplicate(df, by_longest_history=by_longest)
-            self._log(f"  Deduplicated: {len(df)} ETFs (by {'longest history' if by_longest else 'first'})")
+            self._log(f"  Deduplicated: {len(df)} ETFs")
 
         # Format output
         output_cols = {
@@ -398,6 +435,9 @@ class ETFFetcher:
 
         available = [c for c in output_cols if c in df.columns]
         result = df[available].rename(columns=output_cols).reset_index(drop=True)
+
+        # Sort result by ISIN for deterministic output
+        result = result.sort_values('ISIN').reset_index(drop=True)
 
         self._log(f"\nResult: {len(result)} ETFs")
 

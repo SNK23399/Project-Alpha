@@ -50,10 +50,9 @@ Core Satellite/
 │   └── notebooks/                    # Jupyter analysis notebooks
 │
 ├── Maintenance (Database Updates)
-│   ├── maintenance/1_collect_etf_data.py      # Fetch ETF data
-│   ├── maintenance/2_compare_databases.py     # Validate updates
-│   ├── maintenance/3_analyze_data_quality.py  # Quality checks
-│   └── maintenance/4_cleanup_database_by_core.py
+│   ├── maintenance/1_collect_etf_data.py      # Fetch ETF data from DEGIRO/JustETF
+│   ├── maintenance/2_compare_databases.py     # Validate and replace database
+│   └── maintenance/3_analyze_data_quality.py  # Data quality analysis
 │
 ├── Support Modules
 │   ├── support/backtester.py         # Backtesting engine
@@ -162,14 +161,17 @@ The system generates alpha predictions through:
 ## Monthly Update Workflow
 
 ```bash
-# 1. Fetch new price data
+# 1. Fetch new price data (creates etf_database_new.db)
 cd maintenance
-python 1_collect_etf_data.py --update
+python 1_collect_etf_data.py
 
-# 2. Verify data quality
+# 2. Compare databases and replace if valid (prompts y/n, creates dated backup)
 python 2_compare_databases.py
 
-# 3. Recompute signals (incremental)
+# 3. Analyze data quality
+python 3_analyze_data_quality.py
+
+# 4. Recompute signals (incremental)
 cd ..
 python 1_compute_signal_bases.py incremental
 python 2_apply_filters.py
