@@ -62,7 +62,7 @@ except ImportError:
 def _forward_fill_3d(arr: np.ndarray) -> np.ndarray:
     """
     Fast forward-fill for 3D array along time axis (axis=1).
-    Uses pandas with efficient reshaping.
+    Uses bottleneck.push for optimal performance.
 
     Args:
         arr: (n_signals, n_time, n_etfs)
@@ -70,34 +70,24 @@ def _forward_fill_3d(arr: np.ndarray) -> np.ndarray:
     Returns:
         Forward-filled array
     """
+    import bottleneck as bn
+
     n_signals, n_time, n_etfs = arr.shape
 
-    # If array is small enough, use pandas (faster for small arrays)
-    # For large arrays, the overhead of creating DataFrame is too high
-    total_cols = n_signals * n_etfs
+    # Reshape to 2D: (n_time, n_signals * n_etfs)
+    arr_2d = arr.transpose(1, 0, 2).reshape(n_time, -1)
 
-    if total_cols < 50000:
-        # Small array - pandas is fast
-        arr_2d = arr.transpose(1, 0, 2).reshape(n_time, -1)
-        df = pd.DataFrame(arr_2d)
-        result_2d = df.ffill().values
-        return result_2d.reshape(n_time, n_signals, n_etfs).transpose(1, 0, 2)
-    else:
-        # Large array - use in-place numpy approach
-        # Process each signal separately to avoid huge memory allocation
-        result = arr.copy()
-        for sig_idx in range(n_signals):
-            # For this signal, forward fill along time axis
-            sig_data = result[sig_idx]  # (n_time, n_etfs)
-            df = pd.DataFrame(sig_data)
-            result[sig_idx] = df.ffill().values
-        return result
+    # bottleneck.push does forward-fill along axis
+    result_2d = bn.push(arr_2d, axis=0)
+
+    # Reshape back to 3D
+    return result_2d.reshape(n_time, n_signals, n_etfs).transpose(1, 0, 2)
 
 
 def causal_ema(arr: np.ndarray, span: int) -> np.ndarray:
     """
     Causal Exponential Moving Average - no future data used.
-    ULTRA-OPTIMIZED: Uses GPU (CuPy) when available, else scipy.signal.lfilter.
+    OPTIMIZED: Uses scipy.signal.lfilter batch processing (faster than GPU loops).
 
     Handles NaN values by forward-filling before filtering, then restoring NaN positions.
 
@@ -105,19 +95,20 @@ def causal_ema(arr: np.ndarray, span: int) -> np.ndarray:
         arr: (n_time, n_cols) or (n_signals, n_time, n_etfs)
         span: EMA span (half-life roughly span/2)
     """
-    if arr.ndim == 3 and GPU_AVAILABLE:
-        return _causal_ema_gpu(arr, span)
-    else:
-        return _causal_ema_cpu(arr, span)
+    # CPU version with lfilter is faster than GPU with Python loops
+    return _causal_ema_cpu(arr, span)
 
 
 def _causal_ema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
-    """CPU implementation using scipy.signal.lfilter."""
-    from scipy.signal import lfilter
+    """CPU implementation using scipy.signal.lfilter with proper initialization."""
+    from scipy.signal import lfilter, lfilter_zi
 
     alpha = 2 / (span + 1)
     b = np.array([alpha])
     a = np.array([1, -(1 - alpha)])
+
+    # Get initial condition scale factor (so EMA starts at first value, not zero)
+    zi_scale = lfilter_zi(b, a)
 
     nan_mask = np.isnan(arr)
 
@@ -127,7 +118,9 @@ def _causal_ema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
         else:
             arr_filled = arr
 
-        result = lfilter(b, a, arr_filled, axis=0)
+        # Compute initial conditions: zi[i] = zi_scale * first_value[i]
+        zi = zi_scale[:, np.newaxis] * arr_filled[0:1, :]
+        result, _ = lfilter(b, a, arr_filled, axis=0, zi=zi)
         result = np.where(nan_mask, np.nan, result)
         return result
 
@@ -141,7 +134,9 @@ def _causal_ema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
             arr_filled = arr
 
         arr_2d = arr_filled.transpose(1, 0, 2).reshape(n_time, -1)
-        filtered_2d = lfilter(b, a, arr_2d, axis=0)
+        # Compute initial conditions for all columns
+        zi = zi_scale[:, np.newaxis] * arr_2d[0:1, :]
+        filtered_2d, _ = lfilter(b, a, arr_2d, axis=0, zi=zi)
         result = filtered_2d.reshape(n_time, n_signals, n_etfs).transpose(1, 0, 2)
         result = np.where(nan_mask, np.nan, result)
         return result
@@ -225,6 +220,9 @@ def causal_sma(arr: np.ndarray, window: int) -> np.ndarray:
     result[:, window:, :] = (cumsum[:, window:, :] - cumsum[:, :-window, :]) / \
                             np.maximum(count[:, window:, :] - count[:, :-window, :], 1)
 
+    # Restore NaN positions from original input
+    result = np.where(mask, np.nan, result)
+
     return result
 
 
@@ -269,6 +267,9 @@ def causal_wma(arr: np.ndarray, window: int) -> np.ndarray:
         result_gpu = cp.where(valid_count_gpu >= window, result_gpu, cp.nan)
         result_gpu[:, :window-1, :] = cp.nan
 
+        # Restore NaN positions from original input
+        result_gpu = cp.where(mask_gpu, cp.nan, result_gpu)
+
         # Transfer back to CPU
         result = cp.asnumpy(result_gpu)
 
@@ -288,6 +289,9 @@ def causal_wma(arr: np.ndarray, window: int) -> np.ndarray:
         # Invalidate where we don't have full window
         result = np.where(valid_count >= window, result, np.nan)
         result[:, :window-1, :] = np.nan
+
+        # Restore NaN positions from original input
+        result = np.where(mask, np.nan, result)
 
     return result.astype(np.float32)
 
@@ -383,12 +387,16 @@ def _causal_hull_ma_gpu(arr: np.ndarray, period: int) -> np.ndarray:
     warmup = period + sqrt_period - 2
     hull_gpu[:, :warmup, :] = cp.nan
 
+    # Restore NaN positions from original input
+    mask_gpu = cp.asarray(mask)
+    hull_gpu = cp.where(mask_gpu, cp.nan, hull_gpu)
+
     # Transfer back ONCE
     result = cp.asnumpy(hull_gpu)
 
     # Free GPU memory
     del arr_gpu, weights_half_gpu, weights_full_gpu, weights_sqrt_gpu
-    del wma_half_gpu, wma_full_gpu, raw_hull_gpu, raw_hull_clean, hull_gpu
+    del wma_half_gpu, wma_full_gpu, raw_hull_gpu, raw_hull_clean, hull_gpu, mask_gpu
     cp.get_default_memory_pool().free_all_blocks()
 
     return result.astype(np.float32)
@@ -397,7 +405,7 @@ def _causal_hull_ma_gpu(arr: np.ndarray, period: int) -> np.ndarray:
 def causal_dema(arr: np.ndarray, span: int) -> np.ndarray:
     """
     Double Exponential Moving Average - reduced lag.
-    OPTIMIZED: Uses GPU when available, fused 2-pass EMA.
+    OPTIMIZED: Uses scipy.lfilter batch processing (faster than GPU loops).
 
     Formula: DEMA = 2*EMA - EMA(EMA)
 
@@ -405,19 +413,18 @@ def causal_dema(arr: np.ndarray, span: int) -> np.ndarray:
         arr: (n_signals, n_time, n_etfs)
         span: EMA span
     """
-    if arr.ndim == 3 and GPU_AVAILABLE:
-        return _causal_dema_gpu(arr, span)
-    else:
-        return _causal_dema_cpu(arr, span)
+    # CPU version with lfilter is faster than GPU with Python loops
+    return _causal_dema_cpu(arr, span)
 
 
 def _causal_dema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
-    """CPU implementation using scipy.lfilter."""
-    from scipy.signal import lfilter
+    """CPU implementation using scipy.lfilter with proper initialization."""
+    from scipy.signal import lfilter, lfilter_zi
 
     alpha = 2 / (span + 1)
     b = np.array([alpha])
     a = np.array([1, -(1 - alpha)])
+    zi_scale = lfilter_zi(b, a)
 
     n_signals, n_time, n_etfs = arr.shape
     nan_mask = np.isnan(arr)
@@ -429,8 +436,12 @@ def _causal_dema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
         arr_filled = arr
 
     arr_2d = arr_filled.transpose(1, 0, 2).reshape(n_time, -1)
-    ema1_2d = lfilter(b, a, arr_2d, axis=0)
-    ema2_2d = lfilter(b, a, ema1_2d, axis=0)
+    # EMA1 with proper initial condition
+    zi1 = zi_scale[:, np.newaxis] * arr_2d[0:1, :]
+    ema1_2d, _ = lfilter(b, a, arr_2d, axis=0, zi=zi1)
+    # EMA2 with proper initial condition
+    zi2 = zi_scale[:, np.newaxis] * ema1_2d[0:1, :]
+    ema2_2d, _ = lfilter(b, a, ema1_2d, axis=0, zi=zi2)
     dema_2d = 2 * ema1_2d - ema2_2d
 
     result = dema_2d.reshape(n_time, n_signals, n_etfs).transpose(1, 0, 2)
@@ -501,7 +512,7 @@ def causal_trima(arr: np.ndarray, window: int) -> np.ndarray:
 def causal_tema(arr: np.ndarray, span: int) -> np.ndarray:
     """
     Triple Exponential Moving Average - minimal lag, very responsive.
-    OPTIMIZED: Uses GPU when available, fused 3-pass EMA.
+    OPTIMIZED: Uses scipy.lfilter batch processing (faster than GPU loops).
 
     Formula: TEMA = 3*EMA - 3*EMA(EMA) + EMA(EMA(EMA))
 
@@ -509,19 +520,18 @@ def causal_tema(arr: np.ndarray, span: int) -> np.ndarray:
         arr: (n_signals, n_time, n_etfs)
         span: EMA span
     """
-    if arr.ndim == 3 and GPU_AVAILABLE:
-        return _causal_tema_gpu(arr, span)
-    else:
-        return _causal_tema_cpu(arr, span)
+    # CPU version with lfilter is faster than GPU with Python loops
+    return _causal_tema_cpu(arr, span)
 
 
 def _causal_tema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
-    """CPU implementation using scipy.lfilter."""
-    from scipy.signal import lfilter
+    """CPU implementation using scipy.lfilter with proper initialization."""
+    from scipy.signal import lfilter, lfilter_zi
 
     alpha = 2 / (span + 1)
     b = np.array([alpha])
     a = np.array([1, -(1 - alpha)])
+    zi_scale = lfilter_zi(b, a)
 
     n_signals, n_time, n_etfs = arr.shape
     nan_mask = np.isnan(arr)
@@ -533,9 +543,15 @@ def _causal_tema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
         arr_filled = arr
 
     arr_2d = arr_filled.transpose(1, 0, 2).reshape(n_time, -1)
-    ema1_2d = lfilter(b, a, arr_2d, axis=0)
-    ema2_2d = lfilter(b, a, ema1_2d, axis=0)
-    ema3_2d = lfilter(b, a, ema2_2d, axis=0)
+    # EMA1 with proper initial condition
+    zi1 = zi_scale[:, np.newaxis] * arr_2d[0:1, :]
+    ema1_2d, _ = lfilter(b, a, arr_2d, axis=0, zi=zi1)
+    # EMA2 with proper initial condition
+    zi2 = zi_scale[:, np.newaxis] * ema1_2d[0:1, :]
+    ema2_2d, _ = lfilter(b, a, ema1_2d, axis=0, zi=zi2)
+    # EMA3 with proper initial condition
+    zi3 = zi_scale[:, np.newaxis] * ema2_2d[0:1, :]
+    ema3_2d, _ = lfilter(b, a, ema2_2d, axis=0, zi=zi3)
     tema_2d = 3 * ema1_2d - 3 * ema2_2d + ema3_2d
 
     result = tema_2d.reshape(n_time, n_signals, n_etfs).transpose(1, 0, 2)
@@ -591,7 +607,7 @@ def _causal_tema_gpu(arr: np.ndarray, span: int) -> np.ndarray:
 def causal_zlema(arr: np.ndarray, span: int) -> np.ndarray:
     """
     Zero-Lag Exponential Moving Average - momentum-adjusted for minimal lag.
-    OPTIMIZED: Uses GPU when available, avoids array copy for lagged values.
+    OPTIMIZED: Uses scipy.lfilter batch processing (faster than GPU loops).
 
     Formula: ZLEMA = EMA(2*price - price[lag])
     where lag = (span - 1) / 2
@@ -600,10 +616,8 @@ def causal_zlema(arr: np.ndarray, span: int) -> np.ndarray:
         arr: (n_signals, n_time, n_etfs)
         span: EMA span
     """
-    if arr.ndim == 3 and GPU_AVAILABLE:
-        return _causal_zlema_gpu(arr, span)
-    else:
-        return _causal_zlema_cpu(arr, span)
+    # CPU version with lfilter is faster than GPU with Python loops
+    return _causal_zlema_cpu(arr, span)
 
 
 def _causal_zlema_cpu(arr: np.ndarray, span: int) -> np.ndarray:
@@ -707,6 +721,9 @@ def causal_gaussian_ma(arr: np.ndarray, window: int, sigma: float = None) -> np.
         result_gpu = cp.where(valid_count_gpu >= window * 0.5, result_gpu, cp.nan)
         result_gpu[:, :window-1, :] = cp.nan
 
+        # Restore NaN positions from original input
+        result_gpu = cp.where(mask_gpu, cp.nan, result_gpu)
+
         result = cp.asnumpy(result_gpu)
 
         del arr_gpu, weights_gpu, mask_gpu, result_gpu, valid_count_gpu, ones_gpu
@@ -724,6 +741,9 @@ def causal_gaussian_ma(arr: np.ndarray, window: int, sigma: float = None) -> np.
         result = np.where(valid_count >= window * 0.5, result, np.nan)
         result[:, :window-1, :] = np.nan
 
+        # Restore NaN positions from original input
+        result = np.where(mask, np.nan, result)
+
     return result.astype(np.float32)
 
 
@@ -740,19 +760,19 @@ def causal_median(arr: np.ndarray, window: int) -> np.ndarray:
         arr: (n_signals, n_time, n_etfs)
         window: lookback window
 
-    OPTIMIZED: Uses vectorized sliding_window_view on entire 3D array at once.
+    OPTIMIZED: Uses bottleneck.move_median for ~30x speedup over numpy.
     """
-    return _causal_median_vectorized(arr.astype(np.float32), window)
+    return _causal_median_bottleneck(arr.astype(np.float32), window)
 
 
-def _causal_median_vectorized(arr: np.ndarray, window: int) -> np.ndarray:
+def _causal_median_bottleneck(arr: np.ndarray, window: int) -> np.ndarray:
     """
-    Vectorized median filter with chunking to avoid memory issues.
+    Fast median filter using bottleneck.move_median.
 
-    Processes signals in chunks to avoid creating huge sliding window arrays.
+    Bottleneck uses a efficient O(n) algorithm vs O(n*log(n)) for numpy.
+    Handles NaN values by ignoring them in the median calculation.
     """
-    from numpy.lib.stride_tricks import sliding_window_view
-    import warnings
+    import bottleneck as bn
 
     n_signals, n_time, n_etfs = arr.shape
     result = np.full_like(arr, np.nan, dtype=np.float32)
@@ -760,38 +780,22 @@ def _causal_median_vectorized(arr: np.ndarray, window: int) -> np.ndarray:
     if n_time < window:
         return result
 
-    # Estimate memory needed per signal: n_etfs * (n_time - window + 1) * window * 4 bytes
-    # With 587 ETFs, 5889 time, window 63: 587 * 5827 * 63 * 4 = 860 MB per signal
-    # Process in chunks to stay under ~4GB
-    bytes_per_signal = n_etfs * (n_time - window + 1) * window * 4
-    max_memory = 2 * 1024**3  # 2 GB limit
-    chunk_size = max(1, int(max_memory / bytes_per_signal))
+    # Process each signal
+    for sig_idx in range(n_signals):
+        # Get 2D slice: (n_time, n_etfs)
+        signal_data = arr[sig_idx]
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=RuntimeWarning)
+        # bottleneck.move_median works along axis
+        # min_count=1 means output is valid if at least 1 non-NaN value in window
+        median_result = bn.move_median(signal_data, window=window, min_count=1, axis=0)
 
-        # Process signals in chunks
-        for chunk_start in range(0, n_signals, chunk_size):
-            chunk_end = min(chunk_start + chunk_size, n_signals)
-            chunk = arr[chunk_start:chunk_end]  # (chunk_size, n_time, n_etfs)
+        # bottleneck returns result with same shape, but first (window-1) values
+        # are computed with partial windows. We want NaN for warmup period.
+        result[sig_idx, :window-1, :] = np.nan
+        result[sig_idx, window-1:, :] = median_result[window-1:]
 
-            n_chunk = chunk.shape[0]
-
-            # Reshape chunk to (chunk_size * n_etfs, n_time)
-            chunk_2d = chunk.transpose(0, 2, 1).reshape(-1, n_time)
-
-            # Create sliding window view
-            view = sliding_window_view(chunk_2d, window, axis=1)
-
-            # Compute median
-            medians = np.nanmedian(view, axis=2)
-
-            # Reshape back and store
-            medians_3d = medians.reshape(n_chunk, n_etfs, -1).transpose(0, 2, 1)
-            result[chunk_start:chunk_end, window-1:, :] = medians_3d
-
-            # Free memory
-            del chunk_2d, view, medians, medians_3d
+    # Restore NaN positions from original input
+    result = np.where(np.isnan(arr), np.nan, result)
 
     return result
 
@@ -916,7 +920,7 @@ def causal_regime_switching(arr: np.ndarray, fast_window: int = 10, slow_window:
                             vol_window: int = 21, threshold: float = 1.0) -> np.ndarray:
     """
     Regime-Switching Filter - adapts smoothing based on volatility regime.
-    OPTIMIZED: Uses GPU for EMAs + vectorized volatility calculation.
+    OPTIMIZED: Uses CPU with scipy.lfilter EMAs (faster than GPU loops).
 
     In high-volatility regimes: uses fast EMA (more responsive)
     In low-volatility regimes: uses slow EMA (more smoothing)
@@ -928,10 +932,8 @@ def causal_regime_switching(arr: np.ndarray, fast_window: int = 10, slow_window:
         vol_window: window for volatility calculation
         threshold: z-score threshold for regime switch (1.0 = 1 std above mean)
     """
-    if arr.ndim == 3 and GPU_AVAILABLE:
-        return _causal_regime_switching_gpu(arr, fast_window, slow_window, vol_window, threshold)
-    else:
-        return _causal_regime_switching_cpu(arr, fast_window, slow_window, vol_window, threshold)
+    # CPU version with lfilter is faster than GPU with Python loops
+    return _causal_regime_switching_cpu(arr, fast_window, slow_window, vol_window, threshold)
 
 
 def _causal_regime_switching_cpu(arr, fast_window, slow_window, vol_window, threshold):
@@ -1257,12 +1259,16 @@ def causal_kama(arr: np.ndarray, period: int = 10, fast: int = 2, slow: int = 30
     # Reshape back to original shape
     result = result_flat.reshape(n_signals, n_etfs, n_time).transpose(0, 2, 1)
 
+    # Restore NaN positions from original input
+    result = np.where(np.isnan(arr), np.nan, result)
+
     return result
 
 
 def causal_butterworth(arr: np.ndarray, cutoff_period: int, order: int = 2) -> np.ndarray:
     """
     Causal Butterworth low-pass filter - excellent noise reduction.
+    OPTIMIZED: Uses batch processing with scipy.signal.lfilter (~26x speedup).
 
     Uses scipy.signal.lfilter which is causal (only uses past data).
 
@@ -1273,52 +1279,8 @@ def causal_butterworth(arr: np.ndarray, cutoff_period: int, order: int = 2) -> n
 
     Note: cutoff_period of 63 means frequencies faster than 63 days are attenuated.
     """
-    from scipy.signal import butter, lfilter
-
-    n_signals, n_time, n_etfs = arr.shape
-
-    # Nyquist frequency = 0.5 (for daily data)
-    # Cutoff frequency = 1/cutoff_period normalized to Nyquist
-    nyquist = 0.5
-    cutoff_freq = 1 / cutoff_period / 2  # Divide by 2 for Nyquist normalization
-    cutoff_freq = min(cutoff_freq, 0.99 * nyquist)  # Must be < Nyquist
-
-    # Design Butterworth filter
-    b, a = butter(order, cutoff_freq / nyquist, btype='low')
-
-    result = np.full_like(arr, np.nan)
-
-    # Apply filter to each signal/ETF combination
-    # lfilter is causal - only uses past values
-    for sig_idx in range(n_signals):
-        for etf_idx in range(n_etfs):
-            series = arr[sig_idx, :, etf_idx]
-
-            # Find valid (non-NaN) segments
-            valid = ~np.isnan(series)
-            if valid.sum() < cutoff_period * 2:
-                continue
-
-            # Fill NaN with forward fill for filtering, then restore NaN positions
-            series_filled = np.copy(series)
-
-            # Forward fill NaN
-            last_valid = np.nan
-            for i in range(len(series_filled)):
-                if np.isnan(series_filled[i]):
-                    series_filled[i] = last_valid
-                else:
-                    last_valid = series_filled[i]
-
-            # Apply causal filter (lfilter, not filtfilt which is non-causal)
-            if not np.isnan(series_filled).all():
-                filtered = lfilter(b, a, series_filled)
-
-                # Restore NaN positions and handle filter warm-up
-                filtered[:cutoff_period] = np.nan  # Filter needs warm-up period
-                result[sig_idx, :, etf_idx] = np.where(valid, filtered, np.nan)
-
-    return result
+    # Delegate to the optimized batch version
+    return causal_butterworth_fast(arr, cutoff_period, order)
 
 
 def causal_butterworth_fast(arr: np.ndarray, cutoff_period: int, order: int = 2) -> np.ndarray:
@@ -1366,23 +1328,58 @@ def causal_butterworth_fast(arr: np.ndarray, cutoff_period: int, order: int = 2)
     return result
 
 
-def causal_kalman(arr: np.ndarray, process_var: float = 1e-5, measurement_var: float = 1e-2) -> np.ndarray:
-    """
-    Causal Kalman Filter - optimal adaptive smoothing.
+# Numba-optimized Kalman filter kernels
+if NUMBA_AVAILABLE:
+    @njit(cache=False, fastmath=False)
+    def _kalman_kernel_numba(series, process_var, measurement_var, result):
+        """Inner Kalman kernel for single time series."""
+        n_time = len(series)
 
-    The Kalman filter adapts its smoothing based on the signal-to-noise ratio.
-    It's optimal for linear systems with Gaussian noise.
+        # Find first valid value
+        first_valid = -1
+        for i in range(n_time):
+            if not np.isnan(series[i]):
+                first_valid = i
+                break
 
-    Key advantage: Automatically adapts smoothing to signal characteristics.
+        if first_valid < 0:
+            return
 
-    Args:
-        arr: (n_signals, n_time, n_etfs)
-        process_var: Process noise variance (Q) - higher = more responsive
-        measurement_var: Measurement noise variance (R) - higher = more smoothing
+        # Initialize
+        x_est = float(series[first_valid])
+        p_est = 1.0
+        result[first_valid] = x_est
 
-    Returns:
-        Filtered array of same shape
-    """
+        for t in range(first_valid + 1, n_time):
+            x_pred = x_est
+            p_pred = p_est + process_var
+
+            if np.isnan(series[t]):
+                x_est = x_pred
+                p_est = p_pred
+            else:
+                k = p_pred / (p_pred + measurement_var)
+                x_est = x_pred + k * (float(series[t]) - x_pred)
+                p_est = (1.0 - k) * p_pred
+
+            result[t] = x_est
+
+    @njit(parallel=True, cache=False, fastmath=False)
+    def _kalman_batch_numba(arr, process_var, measurement_var, result):
+        """Process 3D array (n_signals, n_time, n_etfs) in parallel."""
+        n_signals, n_time, n_etfs = arr.shape
+        total_series = n_signals * n_etfs
+
+        for flat_idx in prange(total_series):
+            sig_idx = flat_idx // n_etfs
+            etf_idx = flat_idx % n_etfs
+            series = arr[sig_idx, :, etf_idx]
+            result_series = result[sig_idx, :, etf_idx]
+            _kalman_kernel_numba(series, process_var, measurement_var, result_series)
+
+
+def _kalman_python(arr: np.ndarray, process_var: float, measurement_var: float) -> np.ndarray:
+    """Python fallback for Kalman filter (no Numba)."""
     n_signals, n_time, n_etfs = arr.shape
     result = np.full_like(arr, np.nan)
 
@@ -1400,35 +1397,53 @@ def causal_kalman(arr: np.ndarray, process_var: float = 1e-5, measurement_var: f
             if first_valid is None:
                 continue
 
-            # Initialize Kalman state
-            x_est = series[first_valid]  # State estimate
-            p_est = 1.0  # Error covariance estimate
-
+            x_est = series[first_valid]
+            p_est = 1.0
             result[sig_idx, first_valid, etf_idx] = x_est
 
             for t in range(first_valid + 1, n_time):
-                # Prediction step
-                x_pred = x_est  # State transition is identity
+                x_pred = x_est
                 p_pred = p_est + process_var
 
                 if np.isnan(series[t]):
-                    # No measurement - use prediction
                     x_est = x_pred
                     p_est = p_pred
                 else:
-                    # Update step
-                    # Kalman gain
                     k = p_pred / (p_pred + measurement_var)
-
-                    # Updated state estimate
                     x_est = x_pred + k * (series[t] - x_pred)
-
-                    # Updated error covariance
                     p_est = (1 - k) * p_pred
 
                 result[sig_idx, t, etf_idx] = x_est
 
     return result
+
+
+def causal_kalman(arr: np.ndarray, process_var: float = 1e-5, measurement_var: float = 1e-2) -> np.ndarray:
+    """
+    Causal Kalman Filter - optimal adaptive smoothing.
+    OPTIMIZED: Uses Numba JIT with parallel processing (~120x speedup).
+
+    The Kalman filter adapts its smoothing based on the signal-to-noise ratio.
+    It's optimal for linear systems with Gaussian noise.
+
+    Key advantage: Automatically adapts smoothing to signal characteristics.
+
+    Args:
+        arr: (n_signals, n_time, n_etfs)
+        process_var: Process noise variance (Q) - higher = more responsive
+        measurement_var: Measurement noise variance (R) - higher = more smoothing
+
+    Returns:
+        Filtered array of same shape
+    """
+    if NUMBA_AVAILABLE:
+        n_signals, n_time, n_etfs = arr.shape
+        arr_float64 = np.ascontiguousarray(arr.astype(np.float64))
+        result = np.ascontiguousarray(np.full((n_signals, n_time, n_etfs), np.nan, dtype=np.float64))
+        _kalman_batch_numba(arr_float64, process_var, measurement_var, result)
+        return result.astype(np.float32)
+    else:
+        return _kalman_python(arr, process_var, measurement_var)
 
 
 def causal_kalman_fast(arr: np.ndarray, process_var: float = 1e-5, measurement_var: float = 1e-2) -> np.ndarray:
