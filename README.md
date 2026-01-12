@@ -10,24 +10,19 @@ This project aims to generate **consistent positive alpha** over a global market
 
 ## Features
 
-- **871 ETFs** tracked with daily price data from 2009
+- **869 ETFs** tracked with daily price data from 2009
 - **293 signal bases** computed for each ETF (momentum, volatility, risk metrics, etc.)
-- **27 smoothing filters** applied to each signal (7,900+ filtered signals)
+- **25 smoothing filters** applied to each signal (7,325 filtered signals)
 - **Signal combination** into features for ML-based prediction
 - **Backtesting engine** for strategy validation
-- **GPU acceleration** support (optional, via CuPy)
+- **Numba JIT acceleration** for filter computations
 
 ## Installation
 
 ### Prerequisites
 
 ```bash
-pip install pandas numpy scipy matplotlib tqdm justetf-scraping degiro-connector scikit-learn
-```
-
-### Optional (for GPU acceleration)
-```bash
-pip install cupy numba
+pip install pandas numpy scipy matplotlib tqdm justetf-scraping degiro-connector scikit-learn empyrical quantstats ta numba
 ```
 
 ## Project Structure
@@ -36,31 +31,33 @@ pip install cupy numba
 Core Satellite/
 ├── Data Pipeline
 │   ├── 1_compute_signal_bases.py     # Compute 293 raw signals
-│   ├── 2_apply_filters.py            # Apply 27 smoothing filters
+│   ├── 2_apply_filters.py            # Apply 25 smoothing filters
 │   └── 3_compute_features.py         # Combine into ML features
 │
 ├── Signal Libraries
-│   ├── signal_bases_optimized_full.py  # Signal computation (parallelized)
-│   ├── signal_filters.py               # Filter definitions
-│   ├── signal_indicators.py            # Indicator transformations
-│   └── signal_framework_gpu.py         # GPU-accelerated version
+│   ├── library_signal_bases.py       # Signal computation (parallelized)
+│   ├── library_signal_filters.py     # Filter definitions (Numba-accelerated)
+│   └── signal_indicators.py          # Indicator transformations
+│
+├── Testing & Validation
+│   ├── test_signal_correctness.py    # Signal correctness tests
+│   └── validate_filtered_signals.py  # Filtered signal validation
 │
 ├── Analysis
-│   ├── ensemble_discovery.py         # Ensemble model discovery
-│   └── notebooks/                    # Jupyter analysis notebooks
+│   └── ensemble_discovery.py         # Ensemble model discovery
 │
 ├── Maintenance (Database Updates)
-│   ├── maintenance/1_collect_etf_data.py      # Fetch ETF data from DEGIRO/JustETF
+│   ├── maintenance/1_collect_etf_data.py      # Fetch ETF data
 │   ├── maintenance/2_compare_databases.py     # Validate and replace database
 │   └── maintenance/3_analyze_data_quality.py  # Data quality analysis
 │
 ├── Support Modules
 │   ├── support/backtester.py         # Backtesting engine
 │   ├── support/degiro_client.py      # DEGIRO API client
-│   ├── support/etf_database.py       # ETF data storage
+│   ├── support/etf_database.py       # ETF data storage (SQLite)
 │   ├── support/etf_fetcher.py        # ETF catalog fetching
 │   ├── support/price_fetcher.py      # Price data fetching
-│   └── support/signal_database.py    # Signal data storage
+│   └── support/signal_database.py    # Signal data storage (Parquet)
 │
 └── Documentation
     ├── README.md                     # This file
@@ -102,13 +99,17 @@ Computes 293 signal bases including:
 python 2_apply_filters.py
 ```
 
-Applies 27 smoothing/transformation filters to each signal:
-- EMA smoothing (multiple spans)
-- Z-score normalization
+Applies 25 smoothing/transformation filters to each signal:
+- Raw passthrough
+- EMA smoothing (5d, 10d, 21d spans)
+- SMA smoothing (5d, 10d, 21d windows)
+- Hull MA (fast adaptive smoothing)
+- KAMA (Kaufman Adaptive MA)
+- Butterworth lowpass filter
+- Z-score normalization (multiple windows)
 - Percentile ranking
 - Rate of change
-- Regime detection
-- And more...
+- Regime switching detection
 
 ### 4. Compute Features
 
@@ -130,7 +131,7 @@ Combines filtered signals into ML-ready features for prediction.
 The system generates alpha predictions through:
 
 1. **Raw Signals** (293): Technical and fundamental indicators
-2. **Filtered Signals** (7,900+): Smoothed/transformed variants
+2. **Filtered Signals** (7,325): Smoothed/transformed variants
 3. **Features**: Combined signals for ML models
 4. **Predictions**: Expected alpha for each ETF
 5. **Allocation**: Overweight predicted outperformers
@@ -203,10 +204,11 @@ REBALANCE_FREQUENCY = 3      # Quarterly
 ## Performance
 
 Signal computation is parallelized for performance:
-- Uses all available CPU cores
-- Processes ~293 signals × 871 ETFs × 5,951 days
-- Full computation: ~10-15 minutes
-- Incremental update: ~1-2 minutes
+- Uses all available CPU cores via multiprocessing
+- Numba JIT compilation for filter operations
+- Processes ~293 signals × 869 ETFs × 5,951 days
+- Signal base computation: ~10-15 minutes
+- Filter application: ~80 minutes (7,325 filtered signals)
 
 ## Documentation
 

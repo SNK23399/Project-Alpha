@@ -740,54 +740,60 @@ def causal_median(arr: np.ndarray, window: int) -> np.ndarray:
         arr: (n_signals, n_time, n_etfs)
         window: lookback window
 
-    NOTE: Using pure NumPy implementation instead of Numba because Numba's
-    parallel prange causes silent crashes on Windows when used after
-    CuPy/CUDA operations. The NumPy version is slower but stable.
+    OPTIMIZED: Uses vectorized sliding_window_view on entire 3D array at once.
     """
-    # Always use Python/NumPy implementation - Numba crashes with CUDA
-    return _causal_median_python(arr.astype(np.float32), window)
+    return _causal_median_vectorized(arr.astype(np.float32), window)
 
 
-def _median_single_signal(args):
-    """Process a single signal for parallel median computation."""
-    sig_data, window = args
+def _causal_median_vectorized(arr: np.ndarray, window: int) -> np.ndarray:
+    """
+    Vectorized median filter with chunking to avoid memory issues.
+
+    Processes signals in chunks to avoid creating huge sliding window arrays.
+    """
     from numpy.lib.stride_tricks import sliding_window_view
     import warnings
-    import numpy as np
-
-    n_time, n_etfs = sig_data.shape
-    result = np.full_like(sig_data, np.nan)
-
-    if n_time >= window:
-        view = sliding_window_view(sig_data, window, axis=0)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            medians = np.nanmedian(view, axis=2)
-        result[window-1:, :] = medians
-
-    return result
-
-
-def _causal_median_python(arr: np.ndarray, window: int) -> np.ndarray:
-    """Python median filter with CPU parallelization via multiprocessing."""
-    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-    import os
 
     n_signals, n_time, n_etfs = arr.shape
+    result = np.full_like(arr, np.nan, dtype=np.float32)
 
-    # Use ThreadPoolExecutor (faster for NumPy due to GIL release during computation)
-    # ProcessPoolExecutor has too much serialization overhead for large arrays
-    n_workers = min(os.cpu_count() or 4, n_signals, 8)  # Cap at 8 workers
+    if n_time < window:
+        return result
 
-    # Prepare arguments for each signal
-    args_list = [(arr[sig_idx], window) for sig_idx in range(n_signals)]
+    # Estimate memory needed per signal: n_etfs * (n_time - window + 1) * window * 4 bytes
+    # With 587 ETFs, 5889 time, window 63: 587 * 5827 * 63 * 4 = 860 MB per signal
+    # Process in chunks to stay under ~4GB
+    bytes_per_signal = n_etfs * (n_time - window + 1) * window * 4
+    max_memory = 2 * 1024**3  # 2 GB limit
+    chunk_size = max(1, int(max_memory / bytes_per_signal))
 
-    # Process in parallel using threads (NumPy releases GIL)
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        results = list(executor.map(_median_single_signal, args_list))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
 
-    # Stack results
-    return np.stack(results, axis=0).astype(np.float32)
+        # Process signals in chunks
+        for chunk_start in range(0, n_signals, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_signals)
+            chunk = arr[chunk_start:chunk_end]  # (chunk_size, n_time, n_etfs)
+
+            n_chunk = chunk.shape[0]
+
+            # Reshape chunk to (chunk_size * n_etfs, n_time)
+            chunk_2d = chunk.transpose(0, 2, 1).reshape(-1, n_time)
+
+            # Create sliding window view
+            view = sliding_window_view(chunk_2d, window, axis=1)
+
+            # Compute median
+            medians = np.nanmedian(view, axis=2)
+
+            # Reshape back and store
+            medians_3d = medians.reshape(n_chunk, n_etfs, -1).transpose(0, 2, 1)
+            result[chunk_start:chunk_end, window-1:, :] = medians_3d
+
+            # Free memory
+            del chunk_2d, view, medians, medians_3d
+
+    return result
 
 
 # Numba-optimized median kernels using RUNNING MEDIAN algorithm
@@ -972,10 +978,10 @@ def _causal_regime_switching_gpu(arr, fast_window, slow_window, vol_window, thre
 
     # For large arrays, fall back to CPU to avoid OOM
     # GPU memory needed is roughly: 10 * n_signals * n_time * n_etfs * 4 bytes
-    # With 95 signals * 7330 time * 587 etfs * 10 arrays * 4 bytes = ~15GB
-    # This exceeds typical GPU memory, so we use CPU for this filter
+    # With 30 signals * 5889 time * 587 etfs * 10 arrays * 4 bytes = ~4GB
+    # Be conservative - use CPU for anything over 10M elements
     total_elements = n_signals * n_time * n_etfs
-    if total_elements > 50_000_000:  # ~50M elements = ~2GB for 10 arrays
+    if total_elements > 10_000_000:  # ~10M elements = ~400MB for 10 arrays
         # Too large for GPU - use CPU implementation
         return _causal_regime_switching_cpu(arr, fast_window, slow_window, vol_window, threshold)
 
@@ -1048,47 +1054,70 @@ def _causal_regime_switching_gpu(arr, fast_window, slow_window, vol_window, thre
 def _kama_inner_loop_python(series: np.ndarray, period: int, fast_sc: float, slow_sc: float) -> np.ndarray:
     """
     Inner loop for KAMA computation - Python fallback.
+
+    Fixed to handle sparse data where valid values may not be contiguous.
     """
     n_time = len(series)
     result = np.full(n_time, np.nan, dtype=np.float32)
 
-    # Find first valid index
-    first_valid_idx = -1
+    # Find first index with enough valid data to initialize
+    # We need at least 'period' valid values before we can start
+    valid_count = 0
+    init_idx = -1
+
     for i in range(n_time):
         if not np.isnan(series[i]):
-            first_valid_idx = i
-            break
+            valid_count += 1
+            if valid_count >= period:
+                init_idx = i
+                break
+        # Don't reset valid_count - we allow gaps in the data
 
-    if first_valid_idx < 0 or first_valid_idx + period >= n_time:
+    if init_idx < 0:
+        return result  # Not enough valid data
+
+    # Initialize KAMA with first valid value at init_idx
+    kama = series[init_idx]
+    if np.isnan(kama):
+        # Find closest valid value
+        for i in range(init_idx, -1, -1):
+            if not np.isnan(series[i]):
+                kama = series[i]
+                break
+
+    if np.isnan(kama):
         return result
 
-    # Precompute absolute differences for efficiency
-    abs_diff = np.abs(np.diff(series))
-    abs_diff = np.where(np.isnan(abs_diff), 0, abs_diff)
+    result[init_idx] = kama
 
-    # Rolling sum of absolute differences (volatility) using cumsum
-    cumsum_diff = np.cumsum(abs_diff)
-
-    # Initialize KAMA
-    kama = series[first_valid_idx + period - 1]
-    result[first_valid_idx + period - 1] = kama
-
-    for t in range(first_valid_idx + period, n_time):
+    # Process rest of series
+    for t in range(init_idx + 1, n_time):
         if np.isnan(series[t]):
+            result[t] = kama  # Carry forward
+            continue
+
+        # Find value from 'period' steps back (or closest valid)
+        past_val = np.nan
+        for lookback in range(period, min(period + 10, t + 1)):  # Allow some flexibility
+            if t - lookback >= 0 and not np.isnan(series[t - lookback]):
+                past_val = series[t - lookback]
+                break
+
+        if np.isnan(past_val):
             result[t] = kama
             continue
 
         # Efficiency Ratio = |change| / sum(|daily changes|)
-        change = abs(series[t] - series[t - period])
+        change = abs(series[t] - past_val)
 
-        # Rolling sum using cumsum difference
-        if t - period > 0:
-            volatility = cumsum_diff[t - 1] - cumsum_diff[t - period - 1]
-        else:
-            volatility = cumsum_diff[t - 1]
+        # Calculate volatility (sum of absolute changes over period)
+        volatility = 0.0
+        for i in range(max(0, t - period), t):
+            if not np.isnan(series[i]) and not np.isnan(series[i + 1]):
+                volatility += abs(series[i + 1] - series[i])
 
         if volatility > 1e-10:
-            er = change / volatility
+            er = min(change / volatility, 1.0)  # Cap at 1.0
         else:
             er = 0
 
@@ -1104,55 +1133,64 @@ def _kama_inner_loop_python(series: np.ndarray, period: int, fast_sc: float, slo
 
 # Numba-optimized KAMA kernel (compiled at import time if available)
 if NUMBA_AVAILABLE:
-    @njit(cache=True, fastmath=True)
-    def _kama_kernel_numba(series, period, fast_sc, slow_sc, result):
-        """Numba JIT-compiled KAMA inner loop - runs ~50-100x faster."""
+    @njit(cache=False, fastmath=False)  # fastmath=False required for correct NaN handling
+    def _kama_kernel_numba_v2(series, period, fast_sc, slow_sc, result):
+        """Numba JIT-compiled KAMA inner loop - handles sparse data."""
         n_time = len(series)
 
-        # Find first valid index
-        first_valid_idx = -1
+        # Find first index with enough valid data to initialize
+        valid_count = 0
+        init_idx = -1
+
         for i in range(n_time):
             if not np.isnan(series[i]):
-                first_valid_idx = i
-                break
+                valid_count += 1
+                if valid_count >= period:
+                    init_idx = i
+                    break
 
-        if first_valid_idx < 0 or first_valid_idx + period >= n_time:
+        if init_idx < 0:
+            return  # Not enough valid data
+
+        # Initialize KAMA with value at init_idx
+        # Note: at init_idx, we have exactly 'period' valid values up to this point
+        # so series[init_idx] should be valid
+        kama = series[init_idx]
+
+        # Safety check - shouldn't happen if counting is correct
+        if np.isnan(kama):
             return
 
-        # Precompute absolute differences
-        abs_diff = np.empty(n_time - 1, dtype=np.float32)
-        for i in range(n_time - 1):
-            diff = series[i + 1] - series[i]
-            if np.isnan(diff):
-                abs_diff[i] = 0.0
-            else:
-                abs_diff[i] = abs(diff)
+        result[init_idx] = kama
 
-        # Cumsum of absolute differences
-        cumsum_diff = np.empty(n_time - 1, dtype=np.float32)
-        cumsum_diff[0] = abs_diff[0]
-        for i in range(1, n_time - 1):
-            cumsum_diff[i] = cumsum_diff[i - 1] + abs_diff[i]
-
-        # Initialize KAMA
-        kama = series[first_valid_idx + period - 1]
-        result[first_valid_idx + period - 1] = kama
-
-        for t in range(first_valid_idx + period, n_time):
+        # Process rest of series
+        for t in range(init_idx + 1, n_time):
             if np.isnan(series[t]):
+                result[t] = kama  # Carry forward
+                continue
+
+            # Find value from 'period' steps back (or closest valid)
+            past_val = np.nan
+            for lookback in range(period, min(period + 10, t + 1)):
+                if t - lookback >= 0 and not np.isnan(series[t - lookback]):
+                    past_val = series[t - lookback]
+                    break
+
+            if np.isnan(past_val):
                 result[t] = kama
                 continue
 
-            # Efficiency Ratio
-            change = abs(series[t] - series[t - period])
+            # Efficiency Ratio = |change| / sum(|daily changes|)
+            change = abs(series[t] - past_val)
 
-            if t - period > 0:
-                volatility = cumsum_diff[t - 1] - cumsum_diff[t - period - 1]
-            else:
-                volatility = cumsum_diff[t - 1]
+            # Calculate volatility (sum of absolute changes over period)
+            volatility = 0.0
+            for i in range(max(0, t - period), t):
+                if i + 1 < n_time and not np.isnan(series[i]) and not np.isnan(series[i + 1]):
+                    volatility += abs(series[i + 1] - series[i])
 
             if volatility > 1e-10:
-                er = change / volatility
+                er = min(change / volatility, 1.0)  # Cap at 1.0
             else:
                 er = 0.0
 
@@ -1163,26 +1201,23 @@ if NUMBA_AVAILABLE:
             kama = kama + sc * (series[t] - kama)
             result[t] = kama
 
-    @njit(parallel=True, cache=True, fastmath=True)
-    def _kama_batch_numba(arr_flat, n_series, n_time, period, fast_sc, slow_sc, result_flat):
-        """Process all series in parallel using Numba prange."""
-        for idx in prange(n_series):
+    # NOTE: Using parallel=False because parallel=True causes silent crashes
+    # on Windows when processing large arrays after GPU operations.
+    # cache=False to avoid stale cached parallel code.
+    @njit(parallel=False, cache=False, fastmath=False)  # fastmath=False for NaN handling
+    def _kama_batch_numba_v2(arr_flat, n_series, n_time, period, fast_sc, slow_sc, result_flat):
+        """Process all series sequentially using Numba."""
+        for idx in range(n_series):  # Use range instead of prange
             series = arr_flat[idx]
             result = result_flat[idx]
-            _kama_kernel_numba(series, period, fast_sc, slow_sc, result)
+            _kama_kernel_numba_v2(series, period, fast_sc, slow_sc, result)
 
 
 def _kama_inner_loop(series: np.ndarray, period: int, fast_sc: float, slow_sc: float) -> np.ndarray:
     """Wrapper that uses Numba if available, else falls back to Python."""
-    n_time = len(series)
-    result = np.full(n_time, np.nan, dtype=np.float32)
-
-    if NUMBA_AVAILABLE:
-        _kama_kernel_numba(series.astype(np.float32), period, fast_sc, slow_sc, result)
-    else:
-        return _kama_inner_loop_python(series, period, fast_sc, slow_sc)
-
-    return result
+    # TODO: Re-enable Numba after fixing the cached compilation issue
+    # For now, use Python version which correctly handles sparse data
+    return _kama_inner_loop_python(series, period, fast_sc, slow_sc)
 
 
 def causal_kama(arr: np.ndarray, period: int = 10, fast: int = 2, slow: int = 30) -> np.ndarray:
@@ -1212,8 +1247,8 @@ def causal_kama(arr: np.ndarray, period: int = 10, fast: int = 2, slow: int = 30
     result_flat = np.full_like(arr_flat, np.nan, dtype=np.float32)
 
     if NUMBA_AVAILABLE:
-        # Use Numba parallel batch processing - massive speedup
-        _kama_batch_numba(arr_flat, n_series, n_time, period, fast_sc, slow_sc, result_flat)
+        # Use renamed Numba function to force fresh compilation
+        _kama_batch_numba_v2(arr_flat, n_series, n_time, period, fast_sc, slow_sc, result_flat)
     else:
         # Fallback to Python loop
         for idx in range(n_series):
@@ -1628,3 +1663,343 @@ def apply_filter(signals: np.ndarray, filter_name: str, filter_func, filter_kwar
         return signals.astype(np.float32)
     else:
         return filter_func(signals, **filter_kwargs).astype(np.float32)
+
+
+# =============================================================================
+# FILTER REGISTRY - Access filters by name
+# =============================================================================
+
+# Build registry from DEFAULT_FILTER_CONFIGS
+FILTER_REGISTRY = {name: (func, kwargs) for name, func, kwargs in DEFAULT_FILTER_CONFIGS}
+
+
+def get_filter(filter_name: str):
+    """
+    Get a filter function and its default kwargs by name.
+
+    Args:
+        filter_name: Name of the filter (e.g., 'ema_21d', 'hull_63d')
+
+    Returns:
+        Tuple of (filter_function, default_kwargs)
+
+    Raises:
+        KeyError: If filter_name is not found
+    """
+    if filter_name not in FILTER_REGISTRY:
+        raise KeyError(f"Unknown filter: {filter_name}. Available: {list(FILTER_REGISTRY.keys())}")
+    return FILTER_REGISTRY[filter_name]
+
+
+def get_available_filters() -> list:
+    """Return list of all available filter names."""
+    return list(FILTER_REGISTRY.keys())
+
+
+def apply_single_filter(signal_data: np.ndarray, filter_name: str) -> np.ndarray:
+    """
+    Apply a single filter to signal data by name.
+
+    Args:
+        signal_data: 2D array (n_time, n_etfs) for a single signal
+        filter_name: Name of the filter to apply
+
+    Returns:
+        Filtered signal data as float32
+    """
+    filter_func, filter_kwargs = get_filter(filter_name)
+
+    # Expand to 3D for filter functions: (1, n_time, n_etfs)
+    signal_3d = signal_data[np.newaxis, :, :]
+
+    # Apply filter
+    filtered_3d = filter_func(signal_3d, **filter_kwargs)
+
+    # Return as 2D
+    return filtered_3d[0].astype(np.float32)
+
+
+def get_filter_info(filter_name: str) -> dict:
+    """
+    Get detailed information about a filter.
+
+    Args:
+        filter_name: Name of the filter
+
+    Returns:
+        Dictionary with filter info
+    """
+    filter_func, filter_kwargs = get_filter(filter_name)
+    return {
+        'name': filter_name,
+        'function': filter_func.__name__,
+        'parameters': filter_kwargs,
+        'docstring': filter_func.__doc__
+    }
+
+
+def print_available_filters():
+    """Print all available filters with their parameters."""
+    print("=" * 70)
+    print("AVAILABLE FILTERS")
+    print("=" * 70)
+
+    for name, func, kwargs in DEFAULT_FILTER_CONFIGS:
+        params = ", ".join(f"{k}={v}" for k, v in kwargs.items()) if kwargs else "none"
+        print(f"  {name:20s} -> {func.__name__}({params})")
+
+    print("=" * 70)
+    print(f"Total: {len(DEFAULT_FILTER_CONFIGS)} filters")
+
+
+# =============================================================================
+# GENERATOR FUNCTIONS - Incremental computation with yielding
+# =============================================================================
+
+def compute_filtered_signals_generator(
+    signal_bases: dict,
+    filter_names: list = None,
+    skip_signals: set = None
+):
+    """
+    Generator that yields filtered signals one at a time.
+
+    This allows incremental saving without holding all filtered signals in memory.
+
+    Args:
+        signal_bases: Dict mapping signal_name -> 2D array (n_time, n_etfs)
+        filter_names: List of filter names to apply (default: all)
+        skip_signals: Set of filtered signal names to skip (for resume)
+
+    Yields:
+        Tuple of (filtered_signal_name, filtered_data_2d)
+    """
+    if filter_names is None:
+        filter_names = get_available_filters()
+
+    if skip_signals is None:
+        skip_signals = set()
+
+    for signal_name, signal_data in signal_bases.items():
+        # Ensure 2D
+        if signal_data.ndim == 1:
+            signal_data = signal_data.reshape(-1, 1)
+
+        for filter_name in filter_names:
+            # Construct filtered signal name
+            filtered_name = f"{signal_name}__{filter_name}"
+
+            # Skip if already computed
+            if filtered_name in skip_signals:
+                continue
+
+            # Apply filter
+            filtered_data = apply_single_filter(signal_data, filter_name)
+
+            yield filtered_name, filtered_data
+
+
+def compute_filtered_signals_batched(
+    signal_bases: dict,
+    filter_names: list = None,
+    skip_signals: set = None,
+    batch_size: int = 50
+):
+    """
+    Generator that processes signals in batches for efficiency.
+
+    Batches multiple signals together for each filter application,
+    which is more efficient for GPU/vectorized operations.
+
+    Args:
+        signal_bases: Dict mapping signal_name -> 2D array (n_time, n_etfs)
+        filter_names: List of filter names to apply (default: all)
+        skip_signals: Set of filtered signal names to skip (for resume)
+        batch_size: Number of signals to batch together
+
+    Yields:
+        Tuple of (filtered_signal_name, filtered_data_2d)
+    """
+    if filter_names is None:
+        filter_names = get_available_filters()
+
+    if skip_signals is None:
+        skip_signals = set()
+
+    # Get signal names and data
+    signal_names = list(signal_bases.keys())
+
+    # Process each filter
+    for filter_name in filter_names:
+        filter_func, filter_kwargs = get_filter(filter_name)
+
+        # Determine which signals need this filter
+        signals_to_process = []
+        for signal_name in signal_names:
+            filtered_name = f"{signal_name}__{filter_name}"
+            if filtered_name not in skip_signals:
+                signals_to_process.append(signal_name)
+
+        if not signals_to_process:
+            continue
+
+        # Process in batches
+        for batch_start in range(0, len(signals_to_process), batch_size):
+            batch_end = min(batch_start + batch_size, len(signals_to_process))
+            batch_names = signals_to_process[batch_start:batch_end]
+
+            # Stack signals into 3D array: (n_signals, n_time, n_etfs)
+            batch_data = []
+            for signal_name in batch_names:
+                data = signal_bases[signal_name]
+                if data.ndim == 1:
+                    data = data.reshape(-1, 1)
+                batch_data.append(data)
+
+            # Stack along axis 0
+            batch_3d = np.stack(batch_data, axis=0)
+
+            # Apply filter to entire batch
+            filtered_batch = filter_func(batch_3d, **filter_kwargs)
+
+            # Yield individual results
+            for i, signal_name in enumerate(batch_names):
+                filtered_name = f"{signal_name}__{filter_name}"
+                yield filtered_name, filtered_batch[i].astype(np.float32)
+
+
+def compute_all_filtered_signals_generator(
+    signal_bases: dict,
+    filter_names: list = None
+):
+    """
+    Generator that yields all filtered signals (no skip logic).
+
+    Simpler version without resume capability.
+
+    Args:
+        signal_bases: Dict mapping signal_name -> 2D array (n_time, n_etfs)
+        filter_names: List of filter names to apply (default: all)
+
+    Yields:
+        Tuple of (filtered_signal_name, filtered_data_2d)
+    """
+    yield from compute_filtered_signals_generator(
+        signal_bases,
+        filter_names=filter_names,
+        skip_signals=set()
+    )
+
+
+# =============================================================================
+# HIGH-PERFORMANCE FILTER PROCESSING - SEQUENTIAL WITH VECTORIZATION
+# =============================================================================
+
+def compute_filtered_signals_optimized(
+    signal_bases: dict,
+    filter_names: list = None,
+    skip_signals: set = None,
+    batch_size: int = 50,  # Not used, kept for API compat
+    show_progress: bool = True,
+    n_workers: int = None  # Not used, kept for API compat
+):
+    """
+    Memory-efficient filter computation - processes one signal at a time.
+
+    Strategy:
+    - Process each signal through ALL filters before moving to next signal
+    - This keeps memory usage low (only 1 signal in memory at a time)
+    - Uses vectorized numpy/scipy operations for speed
+
+    Args:
+        signal_bases: Dict mapping signal_name -> 2D array (n_time, n_etfs)
+        filter_names: List of filter names to apply (default: all)
+        skip_signals: Set of filtered signal names to skip (for resume)
+        batch_size: Ignored (kept for API compatibility)
+        show_progress: Whether to show tqdm progress bar
+        n_workers: Ignored (kept for API compatibility)
+
+    Yields:
+        Tuple of (filtered_signal_name, filtered_data_2d)
+    """
+    if filter_names is None:
+        filter_names = get_available_filters()
+
+    if skip_signals is None:
+        skip_signals = set()
+
+    signal_names = list(signal_bases.keys())
+    n_signals = len(signal_names)
+
+    if n_signals == 0:
+        return
+
+    # Count total work
+    total_work = 0
+    for signal_name in signal_names:
+        for filter_name in filter_names:
+            if f"{signal_name}__{filter_name}" not in skip_signals:
+                total_work += 1
+
+    if total_work == 0:
+        return
+
+    print(f"  Processing {total_work} filtered signals (sequential, memory-efficient)...")
+
+    # Try to import tqdm for progress bar
+    try:
+        from tqdm import tqdm
+        has_tqdm = True
+    except ImportError:
+        has_tqdm = False
+        show_progress = False
+
+    # Create progress bar
+    if show_progress and has_tqdm:
+        pbar = tqdm(total=total_work, desc="Filtering", unit="sig",
+                   bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
+    else:
+        pbar = None
+
+    # Pre-fetch filter functions
+    filter_funcs = {name: FILTER_REGISTRY[name] for name in filter_names}
+
+    # Process each signal through all filters
+    for signal_name in signal_names:
+        signal_data = signal_bases[signal_name]
+        if signal_data.ndim == 1:
+            signal_data = signal_data.reshape(-1, 1)
+
+        # Expand to 3D once: (1, n_time, n_etfs)
+        signal_3d = signal_data[np.newaxis, :, :].astype(np.float32)
+
+        # Apply all filters to this signal
+        for filter_name in filter_names:
+            filtered_name = f"{signal_name}__{filter_name}"
+
+            if filtered_name in skip_signals:
+                continue
+
+            if pbar:
+                pbar.set_postfix_str(f"{signal_name[:15]}|{filter_name}")
+
+            try:
+                filter_func, filter_kwargs = filter_funcs[filter_name]
+                filtered_3d = filter_func(signal_3d, **filter_kwargs)
+                yield filtered_name, filtered_3d[0].astype(np.float32)
+
+            except Exception as e:
+                print(f"\nERROR {filter_name} on {signal_name}: {e}")
+
+            if pbar:
+                pbar.update(1)
+
+        # Free GPU memory after each signal (if GPU was used)
+        if GPU_AVAILABLE:
+            try:
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+
+    if pbar:
+        pbar.close()

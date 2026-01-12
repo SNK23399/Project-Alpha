@@ -636,15 +636,20 @@ class ETFDatabase:
         Run maintenance optimizations on the database.
 
         Performs:
+        - WAL checkpoint (merge WAL file into main database)
         - Incremental vacuum (reclaim free pages)
         - Analyze (update query planner statistics)
-        - Integrity check
 
         Call this periodically (e.g., after monthly data updates).
+        This will also clean up .db-wal and .db-shm files.
         """
         self._check_writable()
         conn = self._get_connection()
         try:
+            # Checkpoint WAL - merge changes into main database file
+            # TRUNCATE mode: checkpoint and truncate WAL file to zero bytes
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
             # Incremental vacuum - reclaim free pages without full rebuild
             conn.execute("PRAGMA incremental_vacuum")
 

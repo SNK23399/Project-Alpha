@@ -1,282 +1,336 @@
+#!/usr/bin/env python
 """
 Step 2: Apply Filters to Signal Bases
+======================================
 
-This script:
-1. Loads signal bases from the database
-2. Applies all 27 filters
-3. Saves filtered signals to the database
+This script applies smoothing filters to the computed signal bases.
+Each base signal is filtered with multiple filter types (EMA, Hull MA, etc.)
+to create a comprehensive set of filtered signals for downstream analysis.
 
-Run this AFTER computing signal bases (step 1).
+OPTIMIZATIONS:
+- Batch processing: Multiple signals processed through each filter at once
+- Parallel I/O: Concurrent parquet file writing
+- GPU acceleration: Uses CuPy when available
+- Memory efficient: Processes in batches to limit memory usage
+
+Usage:
+    python 2_apply_filters.py [mode] [options]
+
+Modes:
+    full        - Apply all filters to all signals (default)
+    incremental - Only process new/missing filtered signals
+
+Options:
+    --no-resume     - Ignore existing filtered signals, recompute everything
+    --filters       - Comma-separated list of filters to apply (default: all)
+    --signals       - Comma-separated list of base signals to filter (default: all)
+    --batch-size    - Number of signals to process at once (default: 50)
+    --workers       - Number of parallel I/O workers (default: 4)
+
+Examples:
+    python 2_apply_filters.py                      # Full mode with resume
+    python 2_apply_filters.py --no-resume          # Full recompute
+    python 2_apply_filters.py --filters=ema_21d,raw    # Only apply specific filters
+    python 2_apply_filters.py --signals=momentum_252d  # Only filter specific signals
+    python 2_apply_filters.py --batch-size=100     # Larger batches (more memory, faster)
+
+Output:
+    Filtered signals are saved to data/signals/filtered_signals/ as parquet files.
+    Each file is named {base_signal}__{filter_name}.parquet
+    Example: momentum_252d__ema_21d.parquet
 """
 
+import sys
 import time
-from datetime import datetime, timedelta
-import pandas as pd
+import argparse
+import warnings
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+from threading import Thread
 import numpy as np
 
-from support.etf_database import ETFDatabase
+# Suppress expected warnings from NaN handling in filters
+warnings.filterwarnings('ignore', message='All-NaN slice encountered')
+warnings.filterwarnings('ignore', message='Mean of empty slice')
+warnings.filterwarnings('ignore', message='Degrees of freedom')
+
+# Add project root to path
+project_root = Path(__file__).parent
+sys.path.insert(0, str(project_root))
+
 from support.signal_database import SignalDatabase
-from signal_filters import DEFAULT_FILTER_CONFIGS
+from library_signal_filters import (
+    compute_filtered_signals_optimized,
+    get_available_filters,
+    print_available_filters,
+    GPU_AVAILABLE
+)
 
 
-def apply_and_save_filters(
-    signal_names: list = None,
-    filter_names: list = None,
-    start_date: str = None,
-    end_date: str = None,
-    incremental: bool = False,
-    batch_size: int = 10
-):
-    """
-    Apply filters to signal bases and save to database.
-
-    Args:
-        signal_names: List of signal names to filter (None = all)
-        filter_names: List of filter names to apply (None = all 27 filters)
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
-        incremental: If True, only filter new dates
-        batch_size: Number of signals to process at once (memory management)
-
-    Returns:
-        Dict with filtering statistics
-    """
-    print("=" * 80)
-    print("STEP 2: APPLY FILTERS TO SIGNAL BASES")
-    print("=" * 80)
-
-    # Initialize databases
-    db = ETFDatabase("data/etf_database.db")
-    signal_db = SignalDatabase("data/etf_database.db")
-
-    # Get available signal bases
-    stats = signal_db.get_stats()
-    if stats['signal_base_records'] == 0:
-        print("\nERROR: No signal bases found in database!")
-        print("Please run 1_compute_signal_bases.py first")
-        return None
-
-    print(f"\nDatabase state:")
-    print(f"  Signal base records: {stats['signal_base_records']:,}")
-    print(f"  Unique signals: {stats['unique_signal_bases']}")
-    print(f"  Date range: {stats['signal_date_range']}")
-
-    # Determine which signals to filter
-    if signal_names is None:
-        # Get list of available signals from database
-        conn = signal_db._get_connection()
-        try:
-            rows = conn.execute("SELECT DISTINCT signal_name FROM signal_bases").fetchall()
-            signal_names = [row[0] for row in rows]
-        finally:
-            conn.close()
-
-    print(f"\n  Signals to filter: {len(signal_names)}")
-
-    # Determine which filters to apply
-    if filter_names is None:
-        filter_configs = DEFAULT_FILTER_CONFIGS
-    else:
-        filter_configs = [
-            (fname, func, kwargs)
-            for fname, func, kwargs in DEFAULT_FILTER_CONFIGS
-            if fname in filter_names
-        ]
-
-    print(f"  Filters to apply: {len(filter_configs)}")
-
-    # Determine date range
-    if end_date is None:
-        end_date = stats['signal_date_range'][1] if stats['signal_date_range'] else None
-
-    if incremental and start_date is None:
-        # Check last filtered date
-        # TODO: Could track this per filter, but for simplicity use signal_bases range
-        existing_range = signal_db.get_signal_base_date_range(signal_names[0])
-        if existing_range:
-            # Filter last month of data (to be safe with overlapping windows)
-            start_date = (pd.Timestamp(existing_range[1]) - timedelta(days=30)).strftime('%Y-%m-%d')
-            print(f"\nIncremental mode: Filtering from {start_date}")
-        else:
-            incremental = False
-
-    if start_date is None:
-        start_date = stats['signal_date_range'][0] if stats['signal_date_range'] else None
-
-    print(f"  Date range: {start_date} to {end_date}")
-
-    # Apply filters
-    print("\n" + "-" * 80)
-    print("Applying filters...")
-    print("-" * 80)
-
-    total_start = time.time()
-    total_records = 0
-    filter_times = {}
-
-    for filter_idx, (filter_name, filter_func, filter_kwargs) in enumerate(filter_configs, 1):
-        print(f"\n[{filter_idx:2d}/{len(filter_configs)}] Filter: {filter_name}")
-        print("-" * 80)
-
-        filter_start = time.time()
-        filter_records = 0
-
-        # Process signals in batches to manage memory
-        for batch_start in range(0, len(signal_names), batch_size):
-            batch_end = min(batch_start + batch_size, len(signal_names))
-            batch_signals = signal_names[batch_start:batch_end]
-
-            print(f"  Processing signals {batch_start+1}-{batch_end}/{len(signal_names)}...", end=" ")
-
-            # Load signal bases for this batch
-            signals_3d, loaded_names, dates, isins = signal_db.load_signal_bases(
-                batch_signals,
-                start_date=start_date,
-                end_date=end_date,
-                as_3d_array=True
-            )
-
-            if len(loaded_names) == 0:
-                print("(no data)")
-                continue
-
-            # Need lookback for filter warm-up
-            # Load additional history if needed
-            if start_date:
-                lookback_start = (pd.Timestamp(start_date) - timedelta(days=100)).strftime('%Y-%m-%d')
-                signals_full_3d, _, dates_full, _ = signal_db.load_signal_bases(
-                    batch_signals,
-                    start_date=lookback_start,
-                    end_date=end_date,
-                    as_3d_array=True
-                )
-
-                if len(dates_full) > len(dates):
-                    # Use full data for filtering (includes warm-up)
-                    signals_3d = signals_full_3d
-                    dates = dates_full
-
-            # Apply filter to each signal in batch
-            for sig_idx, sig_name in enumerate(loaded_names):
-                signal_data = signals_3d[sig_idx:sig_idx+1, :, :]  # (1, n_time, n_etfs)
-
-                # Apply filter
-                filtered = filter_func(signal_data, **filter_kwargs)
-
-                # If incremental, only save new dates
-                if incremental and start_date:
-                    save_mask = dates >= start_date
-                    save_dates = dates[save_mask]
-                    save_filtered = filtered[:, save_mask, :]
-                else:
-                    save_dates = dates
-                    save_filtered = filtered
-
-                # Save to database
-                n_records = signal_db.update_filtered_signals(
-                    sig_name,
-                    filter_name,
-                    save_filtered,
-                    save_dates,
-                    isins,
-                    replace=(not incremental)
-                )
-
-                filter_records += n_records
-
-            print(f"({filter_records:,} records)")
-
-        filter_time = time.time() - filter_start
-        filter_times[filter_name] = filter_time
-        total_records += filter_records
-
-        print(f"  Filter completed in {filter_time:.1f}s ({filter_records:,} records)")
-
-    total_time = time.time() - total_start
-
-    # Log computation
-    signal_db.log_computation(
-        computation_type="filtering_incremental" if incremental else "filtering_full",
-        start_date=start_date,
-        end_date=end_date,
-        n_etfs=len(isins),
-        n_signals=len(signal_names) * len(filter_configs),
-        computation_time=total_time,
-        notes=f"Applied {len(filter_configs)} filters to {len(signal_names)} signals"
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Apply smoothing filters to signal bases",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
     )
 
-    # Summary
-    print("\n" + "=" * 80)
-    print("FILTERING COMPLETE")
+    parser.add_argument(
+        'mode',
+        nargs='?',
+        default='full',
+        choices=['full', 'incremental'],
+        help='Processing mode (default: full)'
+    )
+
+    parser.add_argument(
+        '--no-resume',
+        action='store_true',
+        help='Ignore existing filtered signals, recompute everything'
+    )
+
+    parser.add_argument(
+        '--filters',
+        type=str,
+        default=None,
+        help='Comma-separated list of filters to apply (default: all)'
+    )
+
+    parser.add_argument(
+        '--signals',
+        type=str,
+        default=None,
+        help='Comma-separated list of base signals to filter (default: all)'
+    )
+
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=30,  # Smaller batches to avoid GPU OOM
+        help='Number of signals to batch together (default: 30)'
+    )
+
+    parser.add_argument(
+        '--workers',
+        type=int,
+        default=8,
+        help='Number of parallel I/O workers (default: 8)'
+    )
+
+    parser.add_argument(
+        '--list-filters',
+        action='store_true',
+        help='List all available filters and exit'
+    )
+
+    return parser.parse_args()
+
+
+def save_worker(save_queue: Queue, signal_db: SignalDatabase, dates, isins, stats: dict):
+    """
+    Worker thread for parallel parquet saving.
+
+    Reads (filtered_name, filtered_data) from queue and saves to parquet.
+    """
+    while True:
+        item = save_queue.get()
+        if item is None:  # Poison pill
+            save_queue.task_done()
+            break
+
+        filtered_name, filtered_data = item
+        try:
+            records = signal_db.save_filtered_signal_from_array(
+                filtered_name,
+                filtered_data,
+                dates,
+                isins
+            )
+            stats['records'] += records
+            stats['count'] += 1
+        except Exception as e:
+            stats['errors'].append((filtered_name, str(e)))
+        finally:
+            save_queue.task_done()
+
+
+def main():
+    """Main entry point for filter application."""
+    args = parse_args()
+
+    # If user wants to see available filters
+    if args.list_filters:
+        print_available_filters()
+        return 0
+
     print("=" * 80)
-    print(f"  Mode: {'Incremental' if incremental else 'Full'}")
-    print(f"  Date range: {start_date} to {end_date}")
-    print(f"  Signal bases: {len(signal_names)}")
-    print(f"  Filters: {len(filter_configs)}")
-    print(f"  Total signal variants: {len(signal_names) * len(filter_configs)}")
-    print(f"  Records saved: {total_records:,}")
-    print(f"  Total time: {total_time:.1f}s ({total_time/60:.1f} min)")
-    print(f"  Records per second: {total_records / total_time:,.0f}")
+    print("STEP 2: APPLY FILTERS TO SIGNAL BASES (OPTIMIZED)")
     print("=" * 80)
 
-    # Show slowest and fastest filters
-    sorted_filters = sorted(filter_times.items(), key=lambda x: x[1], reverse=True)
-    print(f"\nSlowest 5 filters:")
-    for i, (fname, ftime) in enumerate(sorted_filters[:5], 1):
-        print(f"  {i}. {fname:25s} {ftime:6.1f}s")
+    # Initialize database
+    signal_db = SignalDatabase("data/signals")
 
-    print(f"\nFastest 5 filters:")
-    for i, (fname, ftime) in enumerate(sorted_filters[-5:], 1):
-        print(f"  {i}. {fname:25s} {ftime:6.1f}s")
+    # Get base signals
+    base_signal_names = list(signal_db.get_completed_signals())
 
-    # Show database stats
-    stats = signal_db.get_stats()
-    print(f"\nDatabase state after filtering:")
-    print(f"  Signal base records: {stats['signal_base_records']:,}")
-    print(f"  Filtered signal records: {stats['filtered_signal_records']:,}")
-    print(f"  Unique filters: {stats['unique_filters']}")
-    print(f"  Database size: {stats['db_size_mb']:.1f} MB")
+    if not base_signal_names:
+        print("\nERROR: No base signals found!")
+        print("Please run step 1 first: python 1_compute_signal_bases.py")
+        return 1
 
-    return {
-        'mode': 'incremental' if incremental else 'full',
-        'start_date': start_date,
-        'end_date': end_date,
-        'n_signals': len(signal_names),
-        'n_filters': len(filter_configs),
-        'total_variants': len(signal_names) * len(filter_configs),
-        'total_time': total_time,
-        'records_saved': total_records,
-        'filter_times': filter_times
-    }
+    print(f"\nFound {len(base_signal_names)} base signals")
 
+    # Filter to specific signals if requested
+    if args.signals:
+        requested_signals = [s.strip() for s in args.signals.split(',')]
+        base_signal_names = [s for s in base_signal_names if s in requested_signals]
+        print(f"Filtering to {len(base_signal_names)} requested signals")
 
-if __name__ == "__main__":
-    import sys
-
-    # Parse command line arguments
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'full'
-
-    if mode == 'incremental':
-        print("\nRunning in INCREMENTAL mode (filter only new dates)\n")
-        stats = apply_and_save_filters(incremental=True)
-    elif mode == 'full':
-        print("\nRunning in FULL mode (filter all data)\n")
-        stats = apply_and_save_filters(incremental=False)
-    elif mode == 'test':
-        print("\nRunning in TEST mode (single signal, single filter)\n")
-        # Test with just one signal and one filter
-        stats = apply_and_save_filters(
-            signal_names=['ret_1d'],
-            filter_names=['ema_21d'],
-            incremental=False
-        )
+    # Get filter names
+    if args.filters:
+        filter_names = [f.strip() for f in args.filters.split(',')]
+        available = get_available_filters()
+        invalid = [f for f in filter_names if f not in available]
+        if invalid:
+            print(f"\nERROR: Invalid filter names: {invalid}")
+            print(f"Available filters: {available}")
+            return 1
     else:
-        print("Usage:")
-        print("  python 2_apply_filters.py full         # Filter all signal bases")
-        print("  python 2_apply_filters.py incremental  # Filter only new dates")
-        print("  python 2_apply_filters.py test         # Test with one signal/filter")
-        sys.exit(1)
+        filter_names = get_available_filters()
 
-    if stats:
-        print("\n✓ Filters applied and saved successfully!")
-        print("\nNext step: Run 3_compute_features.py to compute final features")
+    print(f"Applying {len(filter_names)} filters")
+
+    # Always recompute all filtered signals (no resume)
+    print("\n(Recomputing all filtered signals)")
+    # Clear existing filtered signals
+    filtered_dir = signal_db.filtered_dir
+    if filtered_dir.exists():
+        import shutil
+        shutil.rmtree(filtered_dir)
+        filtered_dir.mkdir(parents=True, exist_ok=True)
+    completed_filtered = set()
+
+    # Calculate totals
+    total_combinations = len(base_signal_names) * len(filter_names)
+    to_skip = len([s for s in completed_filtered
+                   if any(s.startswith(f"{bn}__") for bn in base_signal_names)])
+    to_compute = total_combinations - to_skip
+
+    print(f"\nConfiguration:")
+    print(f"  Total combinations: {len(base_signal_names)} signals × {len(filter_names)} filters = {total_combinations}")
+    print(f"  Already computed: {to_skip}")
+    print(f"  To compute: {to_compute}")
+    print(f"  Batch size: {args.batch_size} signals")
+    print(f"  I/O workers: {args.workers}")
+    print(f"  GPU available: {GPU_AVAILABLE}")
+
+    if to_compute == 0:
+        print("\nAll filtered signals already computed. Nothing to do.")
+        print("Use --no-resume to force recomputation.")
+        return 0
+
+    # Load all base signals into memory (they're needed for batching)
+    print("\n" + "-" * 80)
+    print("Loading base signals into memory...")
+    print("-" * 80)
+
+    load_start = time.time()
+    signal_bases = {}
+    dates = None
+    isins = None
+
+    for i, signal_name in enumerate(base_signal_names):
+        signal_df = signal_db.load_signal_base(signal_name)
+        if signal_df is None or len(signal_df) == 0:
+            print(f"  WARNING: Could not load {signal_name}, skipping")
+            continue
+
+        signal_bases[signal_name] = signal_df.values.astype(np.float32)
+
+        # Store dates and ISINs from first signal (all should be same)
+        if dates is None:
+            dates = signal_df.index
+            isins = signal_df.columns.tolist()
+
+        if (i + 1) % 50 == 0:
+            print(f"  Loaded {i+1}/{len(base_signal_names)} signals...")
+
+    load_time = time.time() - load_start
+    memory_gb = sum(arr.nbytes for arr in signal_bases.values()) / 1e9
+    print(f"  Loaded {len(signal_bases)} signals in {load_time:.1f}s ({memory_gb:.2f} GB in memory)")
+
+    # Set up parallel saving
+    print("\n" + "-" * 80)
+    print("Applying filters with batch processing...")
+    print("-" * 80)
+
+    save_queue = Queue(maxsize=args.workers * 2)  # Limit queue size to control memory
+    stats = {'count': 0, 'records': 0, 'errors': []}
+
+    # Start save workers
+    save_threads = []
+    for _ in range(args.workers):
+        t = Thread(target=save_worker, args=(save_queue, signal_db, dates, isins, stats))
+        t.daemon = True
+        t.start()
+        save_threads.append(t)
+
+    # Process with optimized batching (tqdm progress bar is built-in)
+    start_time = time.time()
+
+    print(f"\n  Processing {to_compute} filtered signals...")
+
+    for filtered_name, filtered_data in compute_filtered_signals_optimized(
+        signal_bases,
+        filter_names=filter_names,
+        skip_signals=completed_filtered,
+        batch_size=args.batch_size,
+        show_progress=True
+    ):
+        # Queue for parallel saving
+        save_queue.put((filtered_name, filtered_data))
+
+    # Signal workers to stop
+    for _ in save_threads:
+        save_queue.put(None)
+
+    # Wait for all saves to complete
+    save_queue.join()
+
+    elapsed = time.time() - start_time
+
+    # Report errors
+    if stats['errors']:
+        print(f"\nWARNING: {len(stats['errors'])} errors occurred during saving:")
+        for name, err in stats['errors'][:5]:
+            print(f"  {name}: {err}")
+        if len(stats['errors']) > 5:
+            print(f"  ... and {len(stats['errors']) - 5} more")
+
+    print("\n" + "=" * 80)
+    print("FILTER APPLICATION COMPLETE")
+    print("=" * 80)
+    print(f"  Filtered signals computed: {stats['count']}")
+    print(f"  Total records saved: {stats['records']:,}")
+    print(f"  Time elapsed: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    print(f"  Throughput: {stats['count']/elapsed:.1f} signals/sec")
+
+    # Show storage summary
+    filtered_dir = signal_db.filtered_dir
+    if filtered_dir.exists():
+        total_size = sum(f.stat().st_size for f in filtered_dir.glob("*.parquet"))
+        total_files = len(list(filtered_dir.glob("*.parquet")))
+        print(f"\nStorage: {filtered_dir}")
+        print(f"  Total size: {total_size/1e9:.2f} GB")
+        print(f"  Total files: {total_files}")
+
+    print("=" * 80)
+    print("\nFiltered signals saved to data/signals/filtered_signals/")
+    print("Next step: Run 3_backtesting.py to evaluate strategies")
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

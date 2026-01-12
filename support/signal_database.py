@@ -1,36 +1,44 @@
 """
-Signal Database - SQLite-based storage for incremental signal computation.
+Signal Database - Parquet-based storage for incremental signal computation.
 
-Extends ETFDatabase to store:
-- Signal bases (293 raw signals)
-- Filtered signals (signal bases × 27 filters = 7,325+ variants)
-- Filter states (for incremental updates)
+Uses parquet files for fast columnar storage:
+- One parquet file per signal (293 files for signal bases)
+- Each file: rows=dates, columns=ISINs, values=signal values
+- ~10-50x faster writes than SQLite for analytical workloads
+- Native pandas/numpy integration
 
 Key features:
 - Incremental updates: Only recalculate windows with new data
-- State preservation: Filters resume from last state (EMA, Kalman, etc.)
-- Efficient storage: Same SQLite approach as ETF price data
-- Validation: Verify incremental matches full calculation
+- State preservation: Filter states stored as JSON
+- Efficient storage: Columnar compression with snappy
+- Fast reads: Direct memory-mapping, no SQL parsing
+
+Storage structure:
+    data/signals/
+    ├── signal_bases/           # 293 parquet files
+    │   ├── ret_1d.parquet
+    │   ├── vol_21d.parquet
+    │   └── ...
+    ├── filtered_signals/       # signal_name/filter_name.parquet
+    │   ├── ret_1d/
+    │   │   ├── ema_21d.parquet
+    │   │   └── ...
+    │   └── ...
+    ├── filter_states.json      # All filter states
+    └── metadata.json           # Computation log, stats
 
 Usage:
     from signal_database import SignalDatabase
 
     db = SignalDatabase()
 
-    # Compute and store signal bases
-    signals_3d, signal_names = compute_all_signal_bases(etf_prices, core_prices)
-    db.update_signal_bases(signals_3d, signal_names, dates, isins)
-
-    # Apply filters and store
-    filtered = apply_filter(signal_data, filter_name='ema_21d', state=last_state)
-    db.update_filtered_signals(signal_name, filter_name, filtered, dates, isins, new_state)
+    # Save a single signal (fast!)
+    db.save_signal_base('ret_1d', signal_df)
 
     # Load signals for inference
     signals = db.load_signal_bases(['ret_1d', 'vol_21d'], start_date='2024-01-01')
-    filtered = db.load_filtered_signals('ret_1d', 'ema_21d', start_date='2024-01-01')
 """
 
-import sqlite3
 import json
 from pathlib import Path
 from datetime import datetime
@@ -41,255 +49,109 @@ import numpy as np
 
 
 class SignalDatabase:
-    """SQLite database for signal bases, filtered signals, and filter states."""
+    """Parquet-based database for signal bases and filtered signals."""
 
-    def __init__(self, db_path: str = "data/etf_database.db"):
+    def __init__(self, data_dir: str = "data/signals"):
         """
-        Initialize database connection.
-
-        Uses same database as ETFDatabase for consistency.
+        Initialize signal database.
 
         Args:
-            db_path: Path to SQLite database file
+            data_dir: Directory for parquet files
         """
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.data_dir = Path(data_dir)
+        self.signal_bases_dir = self.data_dir / "signal_bases"
+        self.filtered_dir = self.data_dir / "filtered_signals"
+        self.states_file = self.data_dir / "filter_states.json"
+        self.metadata_file = self.data_dir / "metadata.json"
 
-        self._init_schema()
-
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get database connection with optimized settings."""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        # Optimize for bulk inserts
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        # Increase cache size for better performance
-        conn.execute("PRAGMA cache_size=-64000")  # 64MB cache
-        return conn
-
-    def _init_schema(self):
-        """Initialize database schema for signals."""
-        conn = self._get_connection()
-        try:
-            # Signal bases table (raw computed signals)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS signal_bases (
-                    signal_name TEXT,
-                    isin TEXT,
-                    date TEXT,
-                    value REAL,
-                    PRIMARY KEY (signal_name, isin, date)
-                )
-            """)
-
-            # Filtered signals table (signal bases after applying filters)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS filtered_signals (
-                    signal_name TEXT,
-                    filter_name TEXT,
-                    isin TEXT,
-                    date TEXT,
-                    value REAL,
-                    PRIMARY KEY (signal_name, filter_name, isin, date)
-                )
-            """)
-
-            # Filter states table (for incremental updates)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS filter_states (
-                    signal_name TEXT,
-                    filter_name TEXT,
-                    isin TEXT,
-                    last_update TEXT,
-                    state_json TEXT,
-                    PRIMARY KEY (signal_name, filter_name, isin)
-                )
-            """)
-
-            # Computation metadata (track when signals were last computed)
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS computation_log (
-                    computation_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    computation_type TEXT,
-                    computation_date TEXT,
-                    start_date TEXT,
-                    end_date TEXT,
-                    n_etfs INTEGER,
-                    n_signals INTEGER,
-                    computation_time_seconds REAL,
-                    notes TEXT
-                )
-            """)
-
-            # Indexes for faster queries
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_signal_bases_name_date
-                ON signal_bases(signal_name, date)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_signal_bases_isin_date
-                ON signal_bases(isin, date)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_filtered_signals_name_filter_date
-                ON filtered_signals(signal_name, filter_name, date)
-            """)
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_filtered_signals_isin_date
-                ON filtered_signals(isin, date)
-            """)
-
-            conn.commit()
-        finally:
-            conn.close()
+        # Create directories
+        self.signal_bases_dir.mkdir(parents=True, exist_ok=True)
+        self.filtered_dir.mkdir(parents=True, exist_ok=True)
 
     # ==================== Signal Bases ====================
 
-    def update_signal_bases(
-        self,
-        signals_3d: np.ndarray,
-        signal_names: List[str],
-        dates: pd.DatetimeIndex,
-        isins: List[str],
-        replace: bool = False
-    ) -> int:
-        """
-        Update signal base data.
-
-        Args:
-            signals_3d: (n_signals, n_time, n_etfs) array
-            signal_names: List of signal names
-            dates: DatetimeIndex for time axis
-            isins: List of ISINs for ETF axis
-            replace: If True, replace existing data. If False, only add new.
-
-        Returns:
-            Number of records inserted/updated
-        """
-        n_signals, n_time, n_etfs = signals_3d.shape
-
-        if len(signal_names) != n_signals:
-            raise ValueError(f"Signal names ({len(signal_names)}) doesn't match array ({n_signals})")
-        if len(dates) != n_time:
-            raise ValueError(f"Dates ({len(dates)}) doesn't match array ({n_time})")
-        if len(isins) != n_etfs:
-            raise ValueError(f"ISINs ({len(isins)}) doesn't match array ({n_etfs})")
-
-        conn = self._get_connection()
-        try:
-            # Process ONE SIGNAL AT A TIME to avoid memory issues
-            dates_arr = dates.strftime('%Y-%m-%d').values
-            total_records = 0
-
-            if replace:
-                # Delete existing records for these signals
-                signal_placeholders = ','.join(['?'] * len(signal_names))
-                conn.execute(
-                    f"DELETE FROM signal_bases WHERE signal_name IN ({signal_placeholders})",
-                    signal_names
-                )
-                conn.commit()
-
-            # Pre-compute coordinate arrays (reused for each signal) - only ~40MB
-            time_indices, etf_indices = np.meshgrid(
-                np.arange(n_time), np.arange(n_etfs), indexing='ij'
-            )
-            time_flat = time_indices.ravel()
-            etf_flat = etf_indices.ravel()
-            isins_arr = np.array(isins)
-
-            for sig_idx, signal_name in enumerate(signal_names):
-                # Get this signal's 2D array and flatten
-                signal_2d = signals_3d[sig_idx]
-                values_flat = signal_2d.ravel()
-
-                # Filter out NaNs (vectorized - very fast)
-                valid_mask = ~np.isnan(values_flat)
-                valid_times = time_flat[valid_mask]
-                valid_etfs = etf_flat[valid_mask]
-                valid_values = values_flat[valid_mask]
-
-                # Build records using vectorized indexing
-                records = list(zip(
-                    [signal_name] * len(valid_values),
-                    isins_arr[valid_etfs],
-                    dates_arr[valid_times],
-                    valid_values
-                ))
-
-                # Batch insert in chunks of 50000
-                for i in range(0, len(records), 50000):
-                    batch = records[i:i+50000]
-                    conn.executemany("""
-                        INSERT OR REPLACE INTO signal_bases (signal_name, isin, date, value)
-                        VALUES (?, ?, ?, ?)
-                    """, batch)
-                    total_records += len(batch)
-
-                # Commit after each signal and print progress
-                conn.commit()
-                if (sig_idx + 1) % 10 == 0:
-                    print(f"    [Saved {sig_idx + 1}/{n_signals} signals...]")
-
-            print(f"    [Saved all {n_signals} signals to database]")
-            return total_records
-        finally:
-            conn.close()
-
-    def save_single_signal(
+    def save_signal_base(
         self,
         signal_name: str,
-        signal_df: 'pd.DataFrame',
-        replace: bool = True
+        signal_df: pd.DataFrame,
     ) -> int:
         """
-        Save a single signal to the database (memory-efficient).
+        Save a single signal base to parquet file.
 
         Args:
             signal_name: Name of the signal
             signal_df: DataFrame with dates as index, ISINs as columns
-            replace: If True, delete existing records first
 
         Returns:
-            Number of records saved
+            Number of records (non-NaN values)
         """
-        conn = self._get_connection()
-        try:
-            if replace:
-                conn.execute("DELETE FROM signal_bases WHERE signal_name = ?", (signal_name,))
+        # Ensure index is DatetimeIndex
+        if not isinstance(signal_df.index, pd.DatetimeIndex):
+            signal_df.index = pd.to_datetime(signal_df.index)
 
-            # Build records one date at a time (memory efficient)
-            records = []
-            dates_arr = signal_df.index.strftime('%Y-%m-%d').values
-            isins = signal_df.columns.tolist()
+        # Save to parquet with snappy compression (fast + good compression)
+        filepath = self.signal_bases_dir / f"{signal_name}.parquet"
+        signal_df.to_parquet(filepath, compression='snappy')
 
-            for time_idx, date_str in enumerate(dates_arr):
-                row = signal_df.iloc[time_idx]
-                for etf_idx, isin in enumerate(isins):
-                    value = row.iloc[etf_idx]
-                    if not np.isnan(value):
-                        records.append((signal_name, isin, date_str, float(value)))
+        # Return count of non-NaN values
+        return int((~signal_df.isna()).sum().sum())
 
-                # Batch insert every 10000 records to avoid memory buildup
-                if len(records) >= 10000:
-                    conn.executemany("""
-                        INSERT OR REPLACE INTO signal_bases (signal_name, isin, date, value)
-                        VALUES (?, ?, ?, ?)
-                    """, records)
-                    records = []
+    def save_signal_base_from_array(
+        self,
+        signal_name: str,
+        signal_2d: np.ndarray,
+        dates: pd.DatetimeIndex,
+        isins: List[str]
+    ) -> int:
+        """
+        Save a single signal from numpy array.
 
-            # Insert remaining records
-            if records:
-                conn.executemany("""
-                    INSERT OR REPLACE INTO signal_bases (signal_name, isin, date, value)
-                    VALUES (?, ?, ?, ?)
-                """, records)
+        Args:
+            signal_name: Name of the signal
+            signal_2d: 2D array (n_time, n_etfs)
+            dates: DatetimeIndex for rows
+            isins: List of ISIN column names
 
-            conn.commit()
-            return len(dates_arr) * len(isins)  # Approximate count
-        finally:
-            conn.close()
+        Returns:
+            Number of records (non-NaN values)
+        """
+        df = pd.DataFrame(signal_2d, index=dates, columns=isins)
+        return self.save_signal_base(signal_name, df)
+
+    def load_signal_base(
+        self,
+        signal_name: str,
+        isins: List[str] = None,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        Load a single signal base.
+
+        Args:
+            signal_name: Name of the signal
+            isins: List of ISINs to load (None = all)
+            start_date: Optional start date (YYYY-MM-DD)
+            end_date: Optional end date (YYYY-MM-DD)
+
+        Returns:
+            DataFrame with dates as index, ISINs as columns
+        """
+        filepath = self.signal_bases_dir / f"{signal_name}.parquet"
+        if not filepath.exists():
+            return pd.DataFrame()
+
+        # Load with optional column filter
+        columns = isins if isins else None
+        df = pd.read_parquet(filepath, columns=columns)
+
+        # Apply date filter
+        if start_date:
+            df = df[df.index >= start_date]
+        if end_date:
+            df = df[df.index <= end_date]
+
+        return df
 
     def load_signal_bases(
         self,
@@ -298,9 +160,9 @@ class SignalDatabase:
         start_date: str = None,
         end_date: str = None,
         as_3d_array: bool = False
-    ) -> Union[pd.DataFrame, Tuple[np.ndarray, List[str], pd.DatetimeIndex, List[str]]]:
+    ) -> Union[Dict[str, pd.DataFrame], Tuple[np.ndarray, List[str], pd.DatetimeIndex, List[str]]]:
         """
-        Load signal base data.
+        Load multiple signal bases.
 
         Args:
             signal_names: Single signal or list of signals
@@ -308,309 +170,301 @@ class SignalDatabase:
             start_date: Optional start date (YYYY-MM-DD)
             end_date: Optional end date (YYYY-MM-DD)
             as_3d_array: If True, return (signals_3d, signal_names, dates, isins)
-                        If False, return DataFrame with MultiIndex
+                        If False, return dict of DataFrames
 
         Returns:
-            DataFrame or 3D array depending on as_3d_array flag
+            Dict of DataFrames or 3D array depending on as_3d_array flag
         """
         if isinstance(signal_names, str):
             signal_names = [signal_names]
 
-        conn = self._get_connection()
-        try:
-            # Build query
-            query = "SELECT signal_name, isin, date, value FROM signal_bases WHERE signal_name IN ({})".format(
-                ','.join(['?'] * len(signal_names))
-            )
-            params = list(signal_names)
+        # Load each signal
+        signals = {}
+        for name in signal_names:
+            df = self.load_signal_base(name, isins, start_date, end_date)
+            if len(df) > 0:
+                signals[name] = df
 
-            if isins:
-                query += " AND isin IN ({})".format(','.join(['?'] * len(isins)))
-                params.extend(isins)
-            if start_date:
-                query += " AND date >= ?"
-                params.append(start_date)
-            if end_date:
-                query += " AND date <= ?"
-                params.append(end_date)
-
-            query += " ORDER BY signal_name, date, isin"
-
-            df = pd.read_sql_query(query, conn, params=params)
-
-            if len(df) == 0:
-                if as_3d_array:
-                    return np.array([]), [], pd.DatetimeIndex([]), []
-                return pd.DataFrame()
-
-            df['date'] = pd.to_datetime(df['date'])
-
+        if not signals:
             if as_3d_array:
-                # Convert to 3D array
-                unique_signals = df['signal_name'].unique()
-                unique_dates = df['date'].unique()
-                unique_isins = df['isin'].unique()
+                return np.array([]), [], pd.DatetimeIndex([]), []
+            return {}
 
-                n_signals = len(unique_signals)
-                n_time = len(unique_dates)
-                n_etfs = len(unique_isins)
+        if as_3d_array:
+            # Stack into 3D array
+            # First, align all signals to same dates/isins
+            all_dates = sorted(set().union(*[set(df.index) for df in signals.values()]))
+            all_isins = sorted(set().union(*[set(df.columns) for df in signals.values()]))
 
-                signals_3d = np.full((n_signals, n_time, n_etfs), np.nan, dtype=np.float32)
+            n_signals = len(signals)
+            n_time = len(all_dates)
+            n_etfs = len(all_isins)
 
-                # Create lookup dictionaries
-                signal_idx = {sig: i for i, sig in enumerate(unique_signals)}
-                date_idx = {date: i for i, date in enumerate(unique_dates)}
-                isin_idx = {isin: i for i, isin in enumerate(unique_isins)}
+            signals_3d = np.full((n_signals, n_time, n_etfs), np.nan, dtype=np.float32)
 
-                # Fill array
-                for _, row in df.iterrows():
-                    sig_i = signal_idx[row['signal_name']]
-                    time_i = date_idx[row['date']]
-                    etf_i = isin_idx[row['isin']]
-                    signals_3d[sig_i, time_i, etf_i] = row['value']
+            for sig_idx, (name, df) in enumerate(signals.items()):
+                # Reindex to common dates/isins
+                df_aligned = df.reindex(index=all_dates, columns=all_isins)
+                signals_3d[sig_idx] = df_aligned.values
 
-                return signals_3d, list(unique_signals), pd.DatetimeIndex(unique_dates), list(unique_isins)
-            else:
-                # Return as DataFrame with MultiIndex
-                df = df.set_index(['signal_name', 'isin', 'date'])
-                return df['value'].unstack('isin')
-        finally:
-            conn.close()
+            return signals_3d, list(signals.keys()), pd.DatetimeIndex(all_dates), all_isins
 
-    def get_signal_base_date_range(
-        self,
-        signal_name: str,
-        isin: str = None
-    ) -> Optional[Tuple[str, str]]:
+        return signals
+
+    def get_available_signals(self) -> List[str]:
+        """Get list of available signal base names."""
+        return [f.stem for f in self.signal_bases_dir.glob("*.parquet")]
+
+    def get_completed_signals(self) -> set:
+        """Get set of signal names already saved (for resume capability)."""
+        return set(self.get_available_signals())
+
+    def signal_exists(self, signal_name: str) -> bool:
+        """Check if a signal base exists."""
+        return (self.signal_bases_dir / f"{signal_name}.parquet").exists()
+
+    def get_signal_date_range(self, signal_name: str) -> Optional[Tuple[str, str]]:
         """Get date range for a signal base."""
-        conn = self._get_connection()
-        try:
-            if isin:
-                query = """
-                    SELECT MIN(date) as min_date, MAX(date) as max_date
-                    FROM signal_bases
-                    WHERE signal_name = ? AND isin = ?
-                """
-                params = [signal_name, isin]
-            else:
-                query = """
-                    SELECT MIN(date) as min_date, MAX(date) as max_date
-                    FROM signal_bases
-                    WHERE signal_name = ?
-                """
-                params = [signal_name]
-
-            row = conn.execute(query, params).fetchone()
-            if row and row['min_date']:
-                return (row['min_date'], row['max_date'])
+        df = self.load_signal_base(signal_name)
+        if len(df) == 0:
             return None
-        finally:
-            conn.close()
+        return (str(df.index.min().date()), str(df.index.max().date()))
+
+    def delete_signal_base(self, signal_name: str) -> bool:
+        """Delete a signal base file."""
+        filepath = self.signal_bases_dir / f"{signal_name}.parquet"
+        if filepath.exists():
+            filepath.unlink()
+            return True
+        return False
+
+    def clear_all_signal_bases(self):
+        """Delete all signal base files."""
+        for f in self.signal_bases_dir.glob("*.parquet"):
+            f.unlink()
 
     # ==================== Filtered Signals ====================
 
-    def update_filtered_signals(
+    def save_filtered_signal(
         self,
         signal_name: str,
         filter_name: str,
-        filtered_data: np.ndarray,
-        dates: pd.DatetimeIndex,
-        isins: List[str],
-        filter_state: Dict[str, Any] = None,
-        replace: bool = False
+        filtered_df: pd.DataFrame
     ) -> int:
         """
-        Update filtered signal data and optionally save filter state.
+        Save a filtered signal to parquet.
 
         Args:
             signal_name: Base signal name
             filter_name: Filter name (e.g., 'ema_21d')
-            filtered_data: (n_time, n_etfs) array or (1, n_time, n_etfs)
-            dates: DatetimeIndex
-            isins: List of ISINs
-            filter_state: Optional dict with filter state to save
-            replace: If True, replace existing data
+            filtered_df: DataFrame with dates as index, ISINs as columns
 
         Returns:
-            Number of records inserted
+            Number of records (non-NaN values)
         """
-        # Handle 3D array with single signal
-        if filtered_data.ndim == 3:
-            if filtered_data.shape[0] == 1:
-                filtered_data = filtered_data[0]
-            else:
-                raise ValueError("filtered_data must be 2D or 3D with first dim=1")
+        # Create subdirectory for this signal
+        signal_dir = self.filtered_dir / signal_name
+        signal_dir.mkdir(exist_ok=True)
 
-        n_time, n_etfs = filtered_data.shape
+        # Save parquet
+        filepath = signal_dir / f"{filter_name}.parquet"
+        filtered_df.to_parquet(filepath, compression='snappy')
 
-        if len(dates) != n_time:
-            raise ValueError(f"Dates ({len(dates)}) doesn't match array ({n_time})")
-        if len(isins) != n_etfs:
-            raise ValueError(f"ISINs ({len(isins)}) doesn't match array ({n_etfs})")
+        return int((~filtered_df.isna()).sum().sum())
 
-        conn = self._get_connection()
-        try:
-            records = []
-
-            for time_idx, date in enumerate(dates):
-                date_str = pd.Timestamp(date).strftime('%Y-%m-%d')
-                for etf_idx, isin in enumerate(isins):
-                    value = float(filtered_data[time_idx, etf_idx])
-                    if not np.isnan(value):
-                        records.append((signal_name, filter_name, isin, date_str, value))
-
-            if replace:
-                # Delete existing records
-                conn.execute("""
-                    DELETE FROM filtered_signals
-                    WHERE signal_name = ? AND filter_name = ?
-                """, (signal_name, filter_name))
-
-            # Batch insert
-            conn.executemany("""
-                INSERT OR REPLACE INTO filtered_signals
-                (signal_name, filter_name, isin, date, value)
-                VALUES (?, ?, ?, ?, ?)
-            """, records)
-
-            # Update filter states if provided
-            if filter_state:
-                now = datetime.now().isoformat()
-                state_json = json.dumps(filter_state)
-
-                for isin in isins:
-                    # Get isin-specific state if available
-                    if isinstance(filter_state, dict) and isin in filter_state:
-                        isin_state = filter_state[isin]
-                        state_json = json.dumps(isin_state)
-
-                    conn.execute("""
-                        INSERT OR REPLACE INTO filter_states
-                        (signal_name, filter_name, isin, last_update, state_json)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (signal_name, filter_name, isin, now, state_json))
-
-            conn.commit()
-            return len(records)
-        finally:
-            conn.close()
-
-    def load_filtered_signals(
+    def load_filtered_signal(
         self,
         signal_name: str,
         filter_name: str,
         isins: List[str] = None,
         start_date: str = None,
-        end_date: str = None,
-        as_2d_array: bool = False
-    ) -> Union[pd.DataFrame, Tuple[np.ndarray, pd.DatetimeIndex, List[str]]]:
+        end_date: str = None
+    ) -> pd.DataFrame:
         """
-        Load filtered signal data.
+        Load a filtered signal.
 
         Args:
             signal_name: Base signal name
             filter_name: Filter name
-            isins: List of ISINs (None = all)
+            isins: List of ISINs to load (None = all)
             start_date: Optional start date
             end_date: Optional end date
-            as_2d_array: If True, return (data_2d, dates, isins)
-                        If False, return DataFrame
 
         Returns:
-            DataFrame or 2D array depending on as_2d_array flag
+            DataFrame with dates as index, ISINs as columns
         """
-        conn = self._get_connection()
-        try:
-            query = """
-                SELECT isin, date, value FROM filtered_signals
-                WHERE signal_name = ? AND filter_name = ?
-            """
-            params = [signal_name, filter_name]
+        filepath = self.filtered_dir / signal_name / f"{filter_name}.parquet"
+        if not filepath.exists():
+            return pd.DataFrame()
 
-            if isins:
-                query += " AND isin IN ({})".format(','.join(['?'] * len(isins)))
-                params.extend(isins)
-            if start_date:
-                query += " AND date >= ?"
-                params.append(start_date)
-            if end_date:
-                query += " AND date <= ?"
-                params.append(end_date)
+        columns = isins if isins else None
+        df = pd.read_parquet(filepath, columns=columns)
 
-            query += " ORDER BY date, isin"
+        if start_date:
+            df = df[df.index >= start_date]
+        if end_date:
+            df = df[df.index <= end_date]
 
-            df = pd.read_sql_query(query, conn, params=params)
+        return df
 
-            if len(df) == 0:
-                if as_2d_array:
-                    return np.array([]), pd.DatetimeIndex([]), []
-                return pd.DataFrame()
+    def get_available_filters(self, signal_name: str) -> List[str]:
+        """Get list of available filters for a signal."""
+        signal_dir = self.filtered_dir / signal_name
+        if not signal_dir.exists():
+            return []
+        return [f.stem for f in signal_dir.glob("*.parquet")]
 
-            df['date'] = pd.to_datetime(df['date'])
+    def save_filtered_signal_from_array(
+        self,
+        filtered_signal_name: str,
+        filtered_data: np.ndarray,
+        dates: pd.DatetimeIndex,
+        isins: List[str]
+    ) -> int:
+        """
+        Save a filtered signal from numpy array.
 
-            if as_2d_array:
-                # Convert to 2D array
-                pivot = df.pivot(index='date', columns='isin', values='value')
-                return pivot.values, pivot.index, list(pivot.columns)
-            else:
-                # Return as DataFrame
-                return df.pivot(index='date', columns='isin', values='value')
-        finally:
-            conn.close()
+        The filtered_signal_name format is: {base_signal}__{filter_name}
+        Example: "momentum_252d__ema_21d"
+
+        Args:
+            filtered_signal_name: Full filtered signal name (signal__filter)
+            filtered_data: 2D array (n_time, n_etfs)
+            dates: DatetimeIndex for rows
+            isins: List of ISIN column names
+
+        Returns:
+            Number of records (non-NaN values)
+        """
+        # Save as flat parquet file (not nested by signal name)
+        filepath = self.filtered_dir / f"{filtered_signal_name}.parquet"
+
+        # Create DataFrame
+        df = pd.DataFrame(filtered_data, index=dates, columns=isins)
+
+        # Ensure index is DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+
+        # Save to parquet
+        df.to_parquet(filepath, compression='snappy')
+
+        return int((~df.isna()).sum().sum())
+
+    def load_filtered_signal_by_name(
+        self,
+        filtered_signal_name: str,
+        isins: List[str] = None,
+        start_date: str = None,
+        end_date: str = None
+    ) -> pd.DataFrame:
+        """
+        Load a filtered signal by its full name.
+
+        Args:
+            filtered_signal_name: Full name like "momentum_252d__ema_21d"
+            isins: List of ISINs to load (None = all)
+            start_date: Optional start date
+            end_date: Optional end date
+
+        Returns:
+            DataFrame with dates as index, ISINs as columns
+        """
+        filepath = self.filtered_dir / f"{filtered_signal_name}.parquet"
+        if not filepath.exists():
+            return pd.DataFrame()
+
+        columns = isins if isins else None
+        df = pd.read_parquet(filepath, columns=columns)
+
+        if start_date:
+            df = df[df.index >= start_date]
+        if end_date:
+            df = df[df.index <= end_date]
+
+        return df
+
+    def get_completed_filtered_signals(self) -> set:
+        """
+        Get set of completed filtered signal names (for resume capability).
+
+        Returns:
+            Set of filtered signal names like {'momentum_252d__ema_21d', ...}
+        """
+        return {f.stem for f in self.filtered_dir.glob("*.parquet")}
+
+    def filtered_signal_exists(self, filtered_signal_name: str) -> bool:
+        """Check if a filtered signal exists."""
+        return (self.filtered_dir / f"{filtered_signal_name}.parquet").exists()
+
+    def delete_filtered_signal(self, filtered_signal_name: str) -> bool:
+        """Delete a filtered signal file."""
+        filepath = self.filtered_dir / f"{filtered_signal_name}.parquet"
+        if filepath.exists():
+            filepath.unlink()
+            return True
+        return False
+
+    def clear_all_filtered_signals(self):
+        """Delete all filtered signal files."""
+        for f in self.filtered_dir.glob("*.parquet"):
+            f.unlink()
+
+    # ==================== Filter States ====================
+
+    def save_filter_state(
+        self,
+        signal_name: str,
+        filter_name: str,
+        states: Dict[str, Any]
+    ):
+        """
+        Save filter states for incremental updates.
+
+        Args:
+            signal_name: Base signal name
+            filter_name: Filter name
+            states: Dict mapping ISIN -> state dict
+        """
+        # Load existing states
+        all_states = self._load_all_states()
+
+        # Update this signal/filter's states
+        key = f"{signal_name}:{filter_name}"
+        all_states[key] = {
+            'states': states,
+            'last_update': datetime.now().isoformat()
+        }
+
+        # Save back
+        self._save_all_states(all_states)
 
     def load_filter_state(
         self,
         signal_name: str,
-        filter_name: str,
-        isin: str
+        filter_name: str
     ) -> Optional[Dict[str, Any]]:
-        """Load filter state for incremental updates."""
-        conn = self._get_connection()
-        try:
-            row = conn.execute("""
-                SELECT state_json, last_update FROM filter_states
-                WHERE signal_name = ? AND filter_name = ? AND isin = ?
-            """, (signal_name, filter_name, isin)).fetchone()
+        """
+        Load filter states for incremental updates.
 
-            if row and row['state_json']:
-                return {
-                    'state': json.loads(row['state_json']),
-                    'last_update': row['last_update']
-                }
-            return None
-        finally:
-            conn.close()
+        Returns:
+            Dict with 'states' (ISIN -> state) and 'last_update', or None
+        """
+        all_states = self._load_all_states()
+        key = f"{signal_name}:{filter_name}"
+        return all_states.get(key)
 
-    def load_all_filter_states(
-        self,
-        signal_name: str,
-        filter_name: str,
-        isins: List[str] = None
-    ) -> Dict[str, Dict[str, Any]]:
-        """Load filter states for all ISINs."""
-        conn = self._get_connection()
-        try:
-            query = """
-                SELECT isin, state_json, last_update FROM filter_states
-                WHERE signal_name = ? AND filter_name = ?
-            """
-            params = [signal_name, filter_name]
+    def _load_all_states(self) -> Dict:
+        """Load all filter states from JSON."""
+        if self.states_file.exists():
+            with open(self.states_file, 'r') as f:
+                return json.load(f)
+        return {}
 
-            if isins:
-                query += " AND isin IN ({})".format(','.join(['?'] * len(isins)))
-                params.extend(isins)
-
-            rows = conn.execute(query, params).fetchall()
-
-            states = {}
-            for row in rows:
-                states[row['isin']] = {
-                    'state': json.loads(row['state_json']),
-                    'last_update': row['last_update']
-                }
-            return states
-        finally:
-            conn.close()
+    def _save_all_states(self, states: Dict):
+        """Save all filter states to JSON."""
+        with open(self.states_file, 'w') as f:
+            json.dump(states, f)
 
     # ==================== Computation Logging ====================
 
@@ -623,150 +477,149 @@ class SignalDatabase:
         n_signals: int,
         computation_time: float,
         notes: str = None
-    ) -> int:
+    ):
         """Log a computation for tracking."""
-        conn = self._get_connection()
-        try:
-            now = datetime.now().isoformat()
-            cursor = conn.execute("""
-                INSERT INTO computation_log
-                (computation_type, computation_date, start_date, end_date,
-                 n_etfs, n_signals, computation_time_seconds, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (computation_type, now, start_date, end_date,
-                  n_etfs, n_signals, computation_time, notes))
-            conn.commit()
-            return cursor.lastrowid
-        finally:
-            conn.close()
+        metadata = self._load_metadata()
+
+        if 'computation_log' not in metadata:
+            metadata['computation_log'] = []
+
+        metadata['computation_log'].append({
+            'computation_type': computation_type,
+            'computation_date': datetime.now().isoformat(),
+            'start_date': start_date,
+            'end_date': end_date,
+            'n_etfs': n_etfs,
+            'n_signals': n_signals,
+            'computation_time_seconds': computation_time,
+            'notes': notes
+        })
+
+        # Keep only last 100 entries
+        metadata['computation_log'] = metadata['computation_log'][-100:]
+
+        self._save_metadata(metadata)
 
     def get_computation_log(self, limit: int = 20) -> pd.DataFrame:
         """Get recent computation log entries."""
-        conn = self._get_connection()
-        try:
-            query = """
-                SELECT * FROM computation_log
-                ORDER BY computation_date DESC
-                LIMIT ?
-            """
-            df = pd.read_sql_query(query, conn, params=[limit])
-            if len(df) > 0:
-                df['computation_date'] = pd.to_datetime(df['computation_date'])
-            return df
-        finally:
-            conn.close()
+        metadata = self._load_metadata()
+        log = metadata.get('computation_log', [])
+        df = pd.DataFrame(log[-limit:])
+        if len(df) > 0 and 'computation_date' in df.columns:
+            df['computation_date'] = pd.to_datetime(df['computation_date'])
+        return df
+
+    def _load_metadata(self) -> Dict:
+        """Load metadata from JSON."""
+        if self.metadata_file.exists():
+            with open(self.metadata_file, 'r') as f:
+                return json.load(f)
+        return {}
+
+    def _save_metadata(self, metadata: Dict):
+        """Save metadata to JSON."""
+        with open(self.metadata_file, 'w') as f:
+            json.dump(metadata, f, indent=2)
 
     # ==================== Statistics ====================
 
     def get_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
-        conn = self._get_connection()
-        try:
-            signal_base_count = conn.execute(
-                "SELECT COUNT(*) FROM signal_bases"
-            ).fetchone()[0]
+        # Count signal bases
+        signal_files = list(self.signal_bases_dir.glob("*.parquet"))
+        n_signals = len(signal_files)
 
-            filtered_signal_count = conn.execute(
-                "SELECT COUNT(*) FROM filtered_signals"
-            ).fetchone()[0]
+        # Count filtered signals
+        n_filters = 0
+        n_filtered_files = 0
+        for signal_dir in self.filtered_dir.iterdir():
+            if signal_dir.is_dir():
+                filters = list(signal_dir.glob("*.parquet"))
+                n_filtered_files += len(filters)
+                if filters:
+                    n_filters = max(n_filters, len(filters))
 
-            filter_state_count = conn.execute(
-                "SELECT COUNT(*) FROM filter_states"
-            ).fetchone()[0]
+        # Get date range from first signal
+        date_range = None
+        if signal_files:
+            df = pd.read_parquet(signal_files[0])
+            if len(df) > 0:
+                date_range = (str(df.index.min().date()), str(df.index.max().date()))
 
-            unique_signals = conn.execute(
-                "SELECT COUNT(DISTINCT signal_name) FROM signal_bases"
-            ).fetchone()[0]
+        # Calculate total size
+        total_size = sum(f.stat().st_size for f in self.data_dir.rglob("*") if f.is_file())
 
-            unique_filters = conn.execute(
-                "SELECT COUNT(DISTINCT filter_name) FROM filtered_signals"
-            ).fetchone()[0]
-
-            signal_date_range = conn.execute("""
-                SELECT MIN(date), MAX(date) FROM signal_bases
-            """).fetchone()
-
-            return {
-                'signal_base_records': signal_base_count,
-                'filtered_signal_records': filtered_signal_count,
-                'filter_states': filter_state_count,
-                'unique_signal_bases': unique_signals,
-                'unique_filters': unique_filters,
-                'signal_date_range': (signal_date_range[0], signal_date_range[1])
-                                    if signal_date_range[0] else None,
-                'db_size_mb': self.db_path.stat().st_size / (1024 * 1024)
-                             if self.db_path.exists() else 0
-            }
-        finally:
-            conn.close()
-
-    def vacuum(self):
-        """Optimize database file size."""
-        conn = self._get_connection()
-        try:
-            conn.execute("VACUUM")
-        finally:
-            conn.close()
+        return {
+            'unique_signal_bases': n_signals,
+            'unique_filters': n_filters,
+            'filtered_signal_files': n_filtered_files,
+            'signal_date_range': date_range,
+            'total_size_mb': total_size / (1024 * 1024)
+        }
 
     def __repr__(self):
         stats = self.get_stats()
         return (f"SignalDatabase({stats['unique_signal_bases']} signals, "
                 f"{stats['unique_filters']} filters, "
-                f"{stats['signal_base_records']:,} records)")
+                f"{stats['total_size_mb']:.1f} MB)")
 
 
 # Convenience function for quick access
 _default_signal_db = None
 
-def get_signal_database(db_path: str = "data/etf_database.db") -> SignalDatabase:
+
+def get_signal_database(data_dir: str = "data/signals") -> SignalDatabase:
     """Get or create the default signal database instance."""
     global _default_signal_db
-    if _default_signal_db is None or str(_default_signal_db.db_path) != db_path:
-        _default_signal_db = SignalDatabase(db_path)
+    if _default_signal_db is None or str(_default_signal_db.data_dir) != data_dir:
+        _default_signal_db = SignalDatabase(data_dir)
     return _default_signal_db
 
 
 if __name__ == "__main__":
     # Test the database
-    print("Signal Database Test\n")
+    print("Signal Database Test (Parquet-based)\n")
 
-    db = SignalDatabase("data/signal_database_test.db")
+    import time
+
+    db = SignalDatabase("data/signals_test")
 
     # Test signal bases
     print("Testing signal bases...")
-    dates = pd.date_range("2024-01-01", "2024-01-31", freq="D")
-    isins = ["IE00TEST1", "IE00TEST2"]
-    signal_names = ["ret_1d", "vol_21d"]
+    dates = pd.date_range("2024-01-01", "2024-12-31", freq="D")
+    isins = [f"IE00TEST{i:04d}" for i in range(100)]  # 100 ETFs
+    signal_names = ["ret_1d", "vol_21d", "momentum_63d"]
 
-    # Create test data: (2 signals, 31 days, 2 ETFs)
-    signals_3d = np.random.randn(2, 31, 2).astype(np.float32)
+    # Create test data
+    for signal_name in signal_names:
+        df = pd.DataFrame(
+            np.random.randn(len(dates), len(isins)),
+            index=dates,
+            columns=isins
+        )
 
-    n_records = db.update_signal_bases(signals_3d, signal_names, dates, isins)
-    print(f"  Inserted {n_records} records")
+        start = time.time()
+        n_records = db.save_signal_base(signal_name, df)
+        elapsed = time.time() - start
+        print(f"  {signal_name}: {n_records:,} records in {elapsed:.3f}s")
 
     # Load back
-    loaded = db.load_signal_bases(signal_names, isins, as_3d_array=True)
-    loaded_3d, loaded_names, loaded_dates, loaded_isins = loaded
-    print(f"  Loaded shape: {loaded_3d.shape}")
+    print("\nLoading signals...")
+    start = time.time()
+    signals = db.load_signal_bases(signal_names, as_3d_array=True)
+    elapsed = time.time() - start
+    signals_3d, loaded_names, loaded_dates, loaded_isins = signals
+    print(f"  Loaded shape: {signals_3d.shape} in {elapsed:.3f}s")
 
     # Test filtered signals
     print("\nTesting filtered signals...")
-    filtered_data = signals_3d[0]  # Take first signal (31, 2)
-
-    # Create test state
-    filter_state = {
-        "IE00TEST1": {"last_value": 0.001234, "alpha": 0.0909},
-        "IE00TEST2": {"last_value": 0.002345, "alpha": 0.0909}
-    }
-
-    n_records = db.update_filtered_signals(
-        "ret_1d", "ema_21d", filtered_data, dates, isins, filter_state
+    filtered_df = pd.DataFrame(
+        np.random.randn(len(dates), len(isins)),
+        index=dates,
+        columns=isins
     )
-    print(f"  Inserted {n_records} records")
-
-    # Load filter state
-    state = db.load_filter_state("ret_1d", "ema_21d", "IE00TEST1")
-    print(f"  Loaded state: {state}")
+    n_records = db.save_filtered_signal("ret_1d", "ema_21d", filtered_df)
+    print(f"  Saved {n_records:,} filtered records")
 
     # Stats
     print(f"\nDatabase stats:")
@@ -775,5 +628,6 @@ if __name__ == "__main__":
         print(f"  {key}: {value}")
 
     # Cleanup test
-    Path("data/signal_database_test.db").unlink()
+    import shutil
+    shutil.rmtree("data/signals_test")
     print("\nTest complete!")
