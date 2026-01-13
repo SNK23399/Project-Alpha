@@ -10,7 +10,7 @@ ULTRA-FAST implementation using:
 Expected speedup: 10-20x over vectorized numpy, 100-200x over Python loops
 
 Usage:
-    from library_indicators import compute_all_indicators_fast
+    from library_signal_indicators import compute_all_indicators_fast
 
     features = compute_all_indicators_fast(signals_2d)
 """
@@ -21,7 +21,7 @@ import warnings
 
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-# Feature names (same as library_indicators.py)
+# Feature names for cross-sectional indicators
 FEATURE_NAMES = [
     'raw', 'rank', 'zscore', 'rank_norm',
     'pct_above_median', 'pct_in_top_quintile', 'pct_in_top_decile',

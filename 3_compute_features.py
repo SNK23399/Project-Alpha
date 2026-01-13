@@ -21,7 +21,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from support.signal_database import SignalDatabase
-from library_indicators import compute_all_indicators_fast, FEATURE_NAMES
+from library_signal_indicators import compute_all_indicators_fast, FEATURE_NAMES
 
 
 def compute_cross_sectional_features(
