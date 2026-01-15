@@ -160,18 +160,121 @@ Combining 4,509 signal variants with 25 indicators yields 112,725 total features
 
 Beyond the cross-sectional indicators described above, we apply normalization to ensure comparability across features. Signal values vary dramatically in scale and distribution across different signal types and market regimes. The cross-sectional rank divides each ETF's rank by the count of available ETFs, yielding a uniform distribution between 0 and 1. The cross-sectional z-score subtracts the cross-sectional mean and divides by cross-sectional standard deviation. These transformations ensure that selection decisions are based on relative positioning within the current universe rather than absolute signal magnitudes.
 
+\subsection{Portfolio Strategy Implementation}
+\label{subsec:strategy}
+
+Our implementation translates the feature framework into an actionable portfolio strategy through a systematic quarterly rebalancing process.
+
+\subsubsection{Target Variable: 3-Month Forward Alpha}
+
+The fundamental prediction task is identifying ETFs that will generate positive alpha over the next 3 months (63 trading days). For each ETF $i$ at time $t$, we define:
+\begin{equation}
+    \alpha_{i,t+63}^{(fwd)} = \frac{P_{i,t+63}}{P_{i,t}} - \frac{P_{c,t+63}}{P_{c,t}}
+\end{equation}
+where $P_{i,t}$ is the ETF price and $P_{c,t}$ is the core benchmark (ACWI) price. This measures excess return over the benchmark during the holding period.
+
+The 3-month horizon aligns with several considerations: it is long enough to allow technical signals to materialize while being short enough to adapt to changing market conditions; it corresponds to quarterly rebalancing frequency, minimizing transaction costs; and academic research suggests 3-6 month horizons are optimal for momentum and technical strategies \cite{jegadeesh1993returns}.
+
+\subsubsection{Portfolio Construction}
+
+The portfolio maintains a fixed core-satellite allocation:
+\begin{itemize}
+    \item \textbf{Core (60\%):} Constant allocation to iShares Core MSCI World (ISIN: IE00B4L5Y983)
+    \item \textbf{Satellites (40\%):} Distributed equally across $N \in \{3, 4, 5\}$ selected ETFs
+\end{itemize}
+
+At each quarterly rebalancing date, we:
+\begin{enumerate}
+    \item Compute all features for all ETFs using data up to (but not including) the rebalancing date
+    \item Rank ETFs by the selected feature(s)
+    \item Select the top $N$ ETFs (or bottom $N$ for mean reversion strategies)
+    \item Execute full rebalancing: sell all current satellites, adjust core to 60\% of total portfolio value, distribute 40\% equally across new satellites
+    \item Hold positions for 3 months until next rebalancing
+\end{enumerate}
+
+\subsubsection{Profit Locking Mechanism}
+
+A key innovation is the automatic risk-reduction through profit locking. When satellites outperform, their portfolio weight naturally increases beyond the 40\% target. Quarterly rebalancing mechanically sells this excess to restore the 60/40 ratio, thereby transferring gains from tactical positions into the stable core.
+
+Example: Starting with EUR 50,000 (EUR 30,000 core, EUR 20,000 satellites), suppose satellites gain 20\% while core gains 5\% over 3 months. The portfolio grows to EUR 31,500 core + EUR 24,000 satellites = EUR 55,500 total. Rebalancing targets 60\% = EUR 33,300 core and 40\% = EUR 22,200 satellites, requiring EUR 1,800 in satellite profits to be locked into the core.
+
+This creates a convex payoff structure: gains are systematically captured in low-risk assets, while losses trigger increased satellite allocation at lower valuations (potentially beneficial for mean reversion).
+
+\subsubsection{Monthly Contributions}
+
+Between quarterly rebalances, monthly contributions of EUR 1,000 are split 60/40 and added to existing positions proportionally. No trading occurs during these months—contributions simply dollar-cost-average into current holdings. This reduces timing risk and transaction costs while maintaining the target allocation.
+
 \subsection{Feature Discovery and Selection}
 \label{subsec:selection}
 
-Given the large feature space (112,725 features), systematic evaluation is essential. We employ GPU-accelerated computation using CuPy to evaluate all features efficiently. For each feature, we compute predictive metrics on a rolling monthly basis:
+Given the large feature space (112,725 features), systematic evaluation is essential. We compute predictive metrics on a walk-forward quarterly basis to identify features with genuine alpha-generation capability.
 
-\textbf{Top-$k$ advantage:} The average monthly alpha of the top-4 ranked ETFs minus the average alpha across all ETFs. This measures the feature's ability to identify outperformers.
+\subsubsection{Information Coefficient (IC)}
 
-\textbf{Hit rate:} The percentage of months where the top-4 selection outperforms the universe average. This captures consistency of the signal.
+The primary metric is the Information Coefficient, defined as the Spearman rank correlation between feature values and subsequent 3-month alpha:
+\begin{equation}
+    IC_t = \text{corr}_{\text{Spearman}}(\{f_{i,t}\}_{i=1}^{N_{ETF}}, \{\alpha_{i,t+63}^{(fwd)}\}_{i=1}^{N_{ETF}})
+\end{equation}
 
-\textbf{Quintile spread:} The return difference between the top 20\% and bottom 20\% of ranked ETFs, indicating overall discriminative power.
+IC directly measures a feature's ability to rank ETFs by future performance. Positive IC indicates momentum (higher feature values → higher future alpha), while negative IC indicates mean reversion (lower feature values → higher future alpha).
 
-Features are ranked by their top-$k$ advantage, with hit rate used as a secondary criterion. The best-performing features are then analyzed to understand which signal-filter-indicator combinations provide genuine predictive power, as opposed to those that may be artifacts of noise or overfitting.
+We compute IC at each quarterly rebalancing date over the full history, yielding a time series $\{IC_t\}$. The mean IC indicates average predictive power:
+\begin{equation}
+    \overline{IC} = \frac{1}{T}\sum_{t=1}^{T} IC_t
+\end{equation}
+
+The IC Information Ratio measures consistency:
+\begin{equation}
+    IR = \frac{\overline{IC}}{\text{std}(IC)}
+\end{equation}
+
+High IR indicates stable predictive power across different market regimes. Typically, $\overline{IC} > 0.05$ is considered meaningful, and $IR > 1.0$ suggests consistency.
+
+\subsubsection{Selection Performance Metrics}
+
+Beyond correlation, we evaluate actual selection outcomes:
+
+\textbf{Average alpha:} The mean 3-month alpha achieved by selecting the top $N$ ETFs by feature value:
+\begin{equation}
+    \overline{\alpha}_{\text{top-N}} = \frac{1}{T}\sum_{t=1}^{T}\left(\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+63}^{(fwd)}\right)
+\end{equation}
+
+This directly measures the strategy's return generation.
+
+\textbf{Hit rate:} The fraction of quarters where top-$N$ selection generates positive alpha:
+\begin{equation}
+    \text{Hit Rate} = \frac{1}{T}\sum_{t=1}^{T} \mathbb{1}\left[\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+63}^{(fwd)} > 0\right]
+\end{equation}
+
+High hit rates ($>60\%$) indicate consistent rather than sporadic outperformance.
+
+\textbf{Quintile spread:} The difference in average alpha between top 20\% and bottom 20\% of ranked ETFs:
+\begin{equation}
+    \text{Spread}_t = \overline{\alpha}_{Q5,t} - \overline{\alpha}_{Q1,t}
+\end{equation}
+
+Large spreads indicate strong discriminative power across the entire distribution.
+
+\subsubsection{Momentum vs. Mean Reversion}
+
+A critical strategic decision is whether to follow momentum (select high feature values) or mean reversion (select low feature values). We test both:
+
+\textbf{Momentum strategy:} Select ETFs with highest feature ranks (top $N$)
+
+\textbf{Mean reversion strategy:} Select ETFs with lowest feature ranks (bottom $N$)
+
+For each feature, we compute $\overline{\alpha}_{\text{top-N}}$ and $\overline{\alpha}_{\text{bottom-N}}$ separately. The superior strategy determines how we interpret the feature. This allows the data to reveal whether signals are more effective as momentum or contrarian indicators.
+
+\subsubsection{Feature Ranking and Selection}
+
+Features are ranked by their average alpha generation ($\overline{\alpha}_{\text{top-N}}$ or $\overline{\alpha}_{\text{bottom-N}}$, whichever is higher), with secondary criteria:
+\begin{itemize}
+    \item IC Information Ratio $> 1.0$ (consistency requirement)
+    \item Hit rate $> 55\%$ (better than random)
+    \item Statistically significant IC (t-statistic $> 2.0$)
+\end{itemize}
+
+The top-performing features are candidates for portfolio implementation. We also analyze feature redundancy by computing pairwise correlations among top features—highly correlated features provide similar information and need not be combined.
 
 \subsection{Walk-Forward Backtesting}
 \label{subsec:backtesting}

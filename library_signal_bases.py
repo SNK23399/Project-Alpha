@@ -1372,18 +1372,18 @@ def compute_signal_bases_generator(
         return computed_signals.get(name)
 
     # =========================================================================
-    # RETURNS - Using pandas pct_change() for exact match with original
-    # Note: pct_change() uses fill_method='pad' by default which forward-fills NaNs
-    # This is important for matching the original library's behavior exactly
+    # RETURNS - Using pandas pct_change() with explicit fill_method=None
+    # This prevents forward-filling of NaNs before computing returns,
+    # which could introduce subtle look-ahead bias if price data has gaps
     # =========================================================================
     print("  Computing returns...")
 
-    # ETF returns - use pandas pct_change for exact match with original
-    etf_returns = etf_prices.pct_change()
+    # ETF returns - use pandas pct_change with no forward-fill
+    etf_returns = etf_prices.pct_change(fill_method=None)
     etf_returns_arr = etf_returns.values
 
     # Core returns
-    core_returns = core_prices.pct_change()
+    core_returns = core_prices.pct_change(fill_method=None)
     core_returns_arr = core_returns.values
 
     # Universe returns (mean across ETFs)

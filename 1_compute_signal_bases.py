@@ -91,8 +91,9 @@ def compute_and_save_signal_bases(
     print("Loading price data...")
     print("-" * 80)
 
-    # Need extra lookback for rolling calculations (252 days = 1 year)
-    lookback_start = (pd.Timestamp(start_date) - timedelta(days=300)).strftime('%Y-%m-%d')
+    # Need extra lookback for rolling calculations
+    # 400 days ensures full warmup for: 252-day signals + 63-day filters + margin
+    lookback_start = (pd.Timestamp(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
 
     etf_prices = etf_db.load_all_prices(isins=isins, start_date=lookback_start, end_date=end_date)
 

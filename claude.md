@@ -49,7 +49,7 @@ Core Satellite/
 
 **Philosophy**: Combine passive diversification (Core) with active alpha generation (Satellites)
 
-- **Core (25-100%)**: iShares MSCI ACWI (IE00B6R52259)
+- **Core (25-100%)**: iShares MSCI ACWI (IE00B4L5Y983)
   - Global market-cap weighted index
   - ~3000 stocks across developed + emerging markets
   - Low cost (0.20% TER), high liquidity
@@ -118,7 +118,7 @@ from backtester import Backtester, PortfolioMetrics
 
 bt = Backtester(
     prices=price_df,
-    core_isin='IE00B6R52259',
+    core_isin='IE00B4L5Y983',
     satellite_isins={
         'North America': 'IE00B3YCGJ38',
         'Europe': 'IE00B53QG562',
@@ -650,7 +650,7 @@ prices = pd.read_parquet('combined_prices.parquet')
 # Define portfolio
 bt = Backtester(
     prices=prices,
-    core_isin='IE00B6R52259',
+    core_isin='IE00B4L5Y983',
     satellite_isins={'North America': 'IE00B3YCGJ38'},
     core_weight=0.75  # 75% ACWI, 25% S&P 500
 )
@@ -713,7 +713,7 @@ def mean_reversion_weights(date, prices):
 
     # Build weights dict
     weights = {
-        'IE00B6R52259': 0.25,  # Core fixed
+        'IE00B4L5Y983': 0.25,  # Core fixed
         'IE00B3YCGJ38': inverted['IE00B3YCGJ38'] * 0.75,  # Satellites
         # ... other satellites
     }
@@ -913,7 +913,7 @@ ETFFilter(
 
 ### Key ISINs
 
-- **Core**: IE00B6R52259 (iShares MSCI ACWI)
+- **Core**: IE00B4L5Y983 (iShares MSCI ACWI)
 - **North America**: IE00B3YCGJ38 (Invesco S&P 500)
 - **Europe**: IE00B53QG562 (iShares MSCI EMU)
 - **Emerging Markets**: IE00B4L5YC18 (iShares MSCI EM)

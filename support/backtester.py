@@ -12,7 +12,7 @@ Usage:
 
     bt = Backtester(
         prices=price_dataframe,
-        core_isin='IE00B6R52259',
+        core_isin='IE00B4L5Y983',
         satellite_isins={'North America': 'IE00B3YCGJ38', ...},
         core_weight=0.60,
         regional_weights=df_weights  # Optional
@@ -524,7 +524,7 @@ if __name__ == "__main__":
     # Create backtester
     bt = Backtester(
         prices=price_df,
-        core_isin='IE00B6R52259',
+        core_isin='IE00B4L5Y983',
         satellite_isins={
             'North America': 'IE00B3YCGJ38',
             'Europe': 'IE00B53QG562',

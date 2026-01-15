@@ -1,4 +1,46 @@
 \section{Introduction}
 \label{sec:introduction}
 
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+\subsection{Motivation}
+
+Long-term wealth accumulation through equity investing faces a fundamental trade-off: passive index investing provides broad diversification and low costs but limits alpha generation potential, while active management promises outperformance but introduces higher fees, behavioral biases, and tracking error. The core-satellite portfolio framework offers a middle ground, combining the stability of passive core holdings with the upside potential of tactical satellite positions.
+
+However, implementing a successful core-satellite strategy requires solving a critical challenge: systematically identifying which satellite investments will generate positive alpha over the next holding period. Traditional approaches rely on fundamental analysis, sector rotation, or discretionary market timing, which are difficult to execute consistently and objectively.
+
+This document presents a systematic, signal-based approach to satellite selection that addresses these challenges through rigorous quantitative methods. Rather than relying on subjective judgment or narrative-driven investing, we develop a comprehensive feature engineering framework that evaluates over 112,000 potential predictive signals derived from price dynamics, technical indicators, and cross-sectional relationships.
+
+\subsection{Strategy Overview}
+
+Our core-satellite strategy is designed for a 30+ year investment horizon with the following key characteristics:
+
+\begin{itemize}
+    \item \textbf{Core allocation (60\%):} iShares MSCI ACWI provides global diversification across ~3,000 stocks in developed and emerging markets, serving as both the portfolio foundation and the benchmark for measuring alpha.
+
+    \item \textbf{Satellite allocation (40\%):} 3-5 dynamically selected ETFs from a universe of ~500 eligible candidates, chosen quarterly based on predicted 3-month forward alpha.
+
+    \item \textbf{Quarterly rebalancing:} Every 3 months, we recalculate satellite selections and rebalance the portfolio to maintain the 60/40 ratio. This process locks profits from successful satellites into the core allocation while providing capital to new satellite positions.
+
+    \item \textbf{Monthly contributions:} EUR 1,000 per month split 60/40 between core and satellites, implementing dollar-cost averaging to reduce timing risk.
+
+    \item \textbf{Low transaction costs:} EUR 1-3 per trade with no capital gains taxes, making frequent rebalancing economically feasible.
+\end{itemize}
+
+The strategy's defining feature is the profit-locking mechanism: when satellites outperform, the quarterly rebalancing automatically sells a portion of the gains to increase the core allocation, reducing portfolio risk over time. Conversely, when satellites underperform, capital from the stable core is deployed to satellite positions at lower valuations.
+
+\subsection{Contribution}
+
+This document makes several contributions to systematic portfolio management:
+
+\textbf{Comprehensive signal framework:} We design and implement 167 signal bases across 27 categories, capturing momentum, mean reversion, risk dynamics, trend following, and regime-dependent behaviors. Combined with 27 causal smoothing filters and 25 indicator transformations, this yields 112,725 features for evaluation.
+
+\textbf{Rigorous causality:} All filters and transformations are strictly causal (using only past data), and we employ walk-forward backtesting to ensure performance estimates reflect realistic, implementable strategies without look-ahead bias.
+
+\textbf{Feature evaluation methodology:} We develop metrics specifically suited for cross-sectional ETF selection, including Information Coefficient (IC), IC Information Ratio (stability), quintile analysis, and hit rate evaluation. Rather than optimizing for maximum returns, we prioritize consistency and risk-adjusted performance.
+
+\textbf{Momentum vs. mean reversion analysis:} We systematically test whether satellite selection should follow momentum (buying recent winners) or mean reversion (buying recent losers) principles, allowing the data to determine which approach generates superior alpha.
+
+\textbf{Practical implementation:} The strategy is designed for real-world execution with realistic constraints including transaction costs, portfolio constraints (maximum 5 satellites), and tax considerations.
+
+\subsection{Document Structure}
+
+The remainder of this document is organized as follows: Section~\ref{sec:related_work} reviews relevant literature on core-satellite portfolios, factor investing, and technical analysis. Section~\ref{sec:methodology} details our signal construction, filtering, feature engineering, and selection methodology. Section~\ref{sec:results} presents backtesting results and feature performance analysis. Section~\ref{sec:discussion} examines the robustness of our findings across different market regimes and parameter settings. Section~\ref{sec:conclusion} summarizes key insights and discusses future enhancements.

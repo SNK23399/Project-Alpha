@@ -13,13 +13,13 @@ Usage:
     db = ETFDatabase()
 
     # Add ETFs to universe
-    db.add_etf('IE00B6R52259', name='iShares MSCI ACWI', TER=0.20, fund_size=1000)
+    db.add_etf('IE00B4L5Y983', name='iShares MSCI ACWI', TER=0.20, fund_size=1000)
 
     # Update prices
-    db.update_prices('IE00B6R52259', price_series)
+    db.update_prices('IE00B4L5Y983', price_series)
 
     # Load data
-    prices = db.load_prices('IE00B6R52259')
+    prices = db.load_prices('IE00B4L5Y983')
     universe = db.load_universe()
 """
 
