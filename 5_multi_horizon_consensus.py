@@ -35,8 +35,8 @@ CORE_ISIN = 'IE00B4L5Y983'  # iShares Core MSCI World
 PRIMARY_HORIZON = 1  # Primary signal (1 month)
 CONFIRMATION_HORIZONS = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]  # Longer-term confirmation
 
-# Number of satellites to select
-N_SATELLITES = 4
+# Number of satellites to test
+N_SATELLITES_TO_TEST = [1, 2, 3, 4, 5, 6]  # Will test each N value
 
 # Consensus mechanisms to test
 CONSENSUS_METHODS = [
@@ -69,17 +69,17 @@ HORIZON_WEIGHTS = {
 # STEP 1: LOAD ENSEMBLE RANKINGS FOR ALL HORIZONS
 # ============================================================
 
-def load_ensemble_rankings(holding_months):
+def load_ensemble_rankings(holding_months, n_satellites):
     """
     Load the ensemble features and compute rankings for all ETFs.
 
     Returns:
         DataFrame with columns: date, isin, ensemble_score (0-1)
     """
-    print(f"\nLoading {holding_months}-month ensemble...")
+    print(f"\nLoading {holding_months}-month ensemble (N={n_satellites})...")
 
-    # Load ensemble features
-    ensemble_file = Path('data/feature_analysis') / f'ensemble_{holding_months}month.csv'
+    # Load ensemble features (N-specific)
+    ensemble_file = Path('data/feature_analysis') / f'ensemble_{holding_months}month_N{n_satellites}.csv'
     if not ensemble_file.exists():
         print(f"  WARNING: Ensemble file not found: {ensemble_file}")
         return None
@@ -135,17 +135,17 @@ def load_ensemble_rankings(holding_months):
     return df
 
 
-def load_all_horizons():
+def load_all_horizons(n_satellites):
     """Load ensemble rankings for all horizons."""
     print("="*60)
-    print("LOADING ENSEMBLE RANKINGS FOR ALL HORIZONS")
+    print(f"LOADING ENSEMBLE RANKINGS FOR ALL HORIZONS (N={n_satellites})")
     print("="*60)
 
     horizons = [PRIMARY_HORIZON] + CONFIRMATION_HORIZONS
     all_dfs = []
 
     for horizon in horizons:
-        df = load_ensemble_rankings(horizon)
+        df = load_ensemble_rankings(horizon, n_satellites)
         if df is not None:
             all_dfs.append(df)
 
@@ -169,18 +169,19 @@ def load_all_horizons():
 # STEP 2: APPLY CONSENSUS MECHANISMS
 # ============================================================
 
-def apply_consensus(df, method):
+def apply_consensus(df, method, n_satellites):
     """
     Apply consensus mechanism to select top N satellites.
 
     Args:
         df: DataFrame with scores for all horizons
         method: Consensus method name
+        n_satellites: Number of satellites to select
 
     Returns:
         DataFrame with selected ISINs per date
     """
-    print(f"\nApplying consensus method: {method}")
+    print(f"\nApplying consensus method: {method} (N={n_satellites})")
 
     results = []
 
@@ -190,7 +191,7 @@ def apply_consensus(df, method):
         if method == 'primary_only':
             # Just use 1-month rankings
             date_df = date_df.sort_values(f'score_{PRIMARY_HORIZON}m', ascending=False)
-            selected = date_df.head(N_SATELLITES)['isin'].tolist()
+            selected = date_df.head(n_satellites)['isin'].tolist()
 
         elif method == 'unanimous':
             # All horizons must agree (top N in all horizons)
@@ -199,21 +200,21 @@ def apply_consensus(df, method):
             for horizon in [PRIMARY_HORIZON] + CONFIRMATION_HORIZONS:
                 col = f'score_{horizon}m'
                 if col in date_df.columns:
-                    top_n = date_df.nlargest(N_SATELLITES * 2, col)['isin'].tolist()
+                    top_n = date_df.nlargest(n_satellites * 2, col)['isin'].tolist()
                     top_sets.append(set(top_n))
 
             # Intersection of all sets
             if len(top_sets) > 0:
                 unanimous = set.intersection(*top_sets)
-                selected = list(unanimous)[:N_SATELLITES]
+                selected = list(unanimous)[:n_satellites]
 
                 # If not enough unanimous, fill with primary
-                if len(selected) < N_SATELLITES:
-                    primary_top = date_df.nlargest(N_SATELLITES, f'score_{PRIMARY_HORIZON}m')
+                if len(selected) < n_satellites:
+                    primary_top = date_df.nlargest(n_satellites, f'score_{PRIMARY_HORIZON}m')
                     for isin in primary_top['isin']:
                         if isin not in selected:
                             selected.append(isin)
-                            if len(selected) >= N_SATELLITES:
+                            if len(selected) >= n_satellites:
                                 break
             else:
                 selected = []
@@ -224,7 +225,7 @@ def apply_consensus(df, method):
             for horizon in [PRIMARY_HORIZON] + CONFIRMATION_HORIZONS:
                 col = f'score_{horizon}m'
                 if col in date_df.columns:
-                    top_n = date_df.nlargest(N_SATELLITES * 2, col)['isin'].tolist()
+                    top_n = date_df.nlargest(n_satellites * 2, col)['isin'].tolist()
                     for isin in top_n:
                         vote_counts[isin] = vote_counts.get(isin, 0) + 1
 
@@ -234,7 +235,7 @@ def apply_consensus(df, method):
                 ['votes', f'score_{PRIMARY_HORIZON}m'],
                 ascending=[False, False]
             )
-            selected = date_df.head(N_SATELLITES)['isin'].tolist()
+            selected = date_df.head(n_satellites)['isin'].tolist()
 
         elif method == 'weighted_avg':
             # Weighted average of all horizon scores
@@ -245,7 +246,7 @@ def apply_consensus(df, method):
                     date_df['weighted_score'] += date_df[col] * weight
 
             date_df = date_df.sort_values('weighted_score', ascending=False)
-            selected = date_df.head(N_SATELLITES)['isin'].tolist()
+            selected = date_df.head(n_satellites)['isin'].tolist()
 
         elif method == 'primary_veto':
             # Use primary, but veto if 2+ longer horizons strongly disagree
@@ -266,15 +267,15 @@ def apply_consensus(df, method):
                 # If 2+ horizons disagree, veto
                 if disagreements < 2:
                     selected.append(isin)
-                    if len(selected) >= N_SATELLITES:
+                    if len(selected) >= n_satellites:
                         break
 
             # If not enough after vetoes, fill with primary
-            if len(selected) < N_SATELLITES:
+            if len(selected) < n_satellites:
                 for isin in date_df_sorted['isin']:
                     if isin not in selected:
                         selected.append(isin)
-                        if len(selected) >= N_SATELLITES:
+                        if len(selected) >= n_satellites:
                             break
 
         else:
@@ -355,10 +356,10 @@ def evaluate_performance(selections_df, alpha_df, method_name):
 # STEP 4: COMPARE ALL METHODS
 # ============================================================
 
-def compare_all_methods(rankings_df):
+def compare_all_methods(rankings_df, n_satellites):
     """Compare all consensus methods."""
     print("\n" + "="*60)
-    print("COMPARING CONSENSUS METHODS")
+    print(f"COMPARING CONSENSUS METHODS (N={n_satellites})")
     print("="*60)
 
     # Load 1-month forward alpha for evaluation
@@ -374,7 +375,7 @@ def compare_all_methods(rankings_df):
         print(f"{'='*60}")
 
         # Apply consensus
-        selections = apply_consensus(rankings_df, method)
+        selections = apply_consensus(rankings_df, method, n_satellites)
 
         # Evaluate performance
         perf = evaluate_performance(selections, alpha_df, method)
@@ -527,39 +528,95 @@ def visualize_comparison(results):
 # ============================================================
 
 def main():
-    """Run the multi-horizon consensus analysis."""
+    """Run the multi-horizon consensus analysis for multiple N values."""
     print("\n" + "="*60)
-    print("MULTI-HORIZON CONSENSUS STRATEGY")
+    print("MULTI-HORIZON CONSENSUS STRATEGY - TESTING MULTIPLE N VALUES")
     print("="*60)
     print(f"\nPrimary Horizon: {PRIMARY_HORIZON} month")
     print(f"Confirmation Horizons: {CONFIRMATION_HORIZONS}")
-    print(f"Number of Satellites: {N_SATELLITES}")
+    print(f"Testing N values: {N_SATELLITES_TO_TEST}")
     print(f"Consensus Methods: {len(CONSENSUS_METHODS)}")
 
-    # Step 1: Load ensemble rankings
-    rankings_df = load_all_horizons()
+    # Store all results across N values
+    all_n_results = []
 
-    # Step 2-3: Compare all methods
-    results = compare_all_methods(rankings_df)
+    # Test each N value
+    for n in N_SATELLITES_TO_TEST:
+        print(f"\n{'#'*60}")
+        print(f"# TESTING N={n} SATELLITES")
+        print(f"{'#'*60}")
 
-    # Step 4: Visualize
-    if len(results) > 0:
-        visualize_comparison(results)
+        # Step 1: Load ensemble rankings for this N
+        rankings_df = load_all_horizons(n)
+
+        # Step 2-3: Compare all methods for this N
+        results = compare_all_methods(rankings_df, n)
+
+        # Add N identifier to each result
+        for result in results:
+            result['n_satellites'] = n
+            all_n_results.append(result)
 
     print("\n" + "="*60)
-    print("ANALYSIS COMPLETE")
+    print("ANALYSIS COMPLETE - ALL N VALUES TESTED")
     print("="*60)
 
-    # Print final recommendation
-    if len(results) > 0:
-        best_alpha = max(results, key=lambda x: x['avg_alpha'])
-        best_hit_rate = max(results, key=lambda x: x['hit_rate'])
-        best_sharpe = max(results, key=lambda x: x['sharpe'])
+    # Create summary DataFrame
+    if len(all_n_results) > 0:
+        import pandas as pd
+        df_summary = pd.DataFrame(all_n_results)
 
-        print("\nRECOMMENDATIONS:")
-        print(f"  Best Alpha: {best_alpha['method']} ({best_alpha['avg_alpha']*100:.2f}%)")
-        print(f"  Best Hit Rate: {best_hit_rate['method']} ({best_hit_rate['hit_rate']:.2%})")
-        print(f"  Best Sharpe: {best_sharpe['method']} ({best_sharpe['sharpe']:.3f})")
+        # Sort by N and then by Sharpe ratio
+        df_summary = df_summary.sort_values(['n_satellites', 'sharpe'], ascending=[True, False])
+
+        # Save summary
+        output_dir = Path('data/multi_horizon_consensus')
+        output_dir.mkdir(exist_ok=True)
+        summary_file = output_dir / 'multi_n_comparison.csv'
+        df_summary.to_csv(summary_file, index=False)
+        print(f"\n[Saved] Multi-N comparison: {summary_file}")
+
+        # Print comparison by N
+        print("\n" + "="*60)
+        print("COMPARISON ACROSS N VALUES")
+        print("="*60)
+
+        for n in N_SATELLITES_TO_TEST:
+            n_results = [r for r in all_n_results if r['n_satellites'] == n]
+            if n_results:
+                best_result = max(n_results, key=lambda x: x['sharpe'])
+                print(f"\nN={n}:")
+                print(f"  Best Method: {best_result['method']}")
+                print(f"  Alpha: {best_result['avg_alpha']*100:.2f}% ± {best_result['std_alpha']*100:.2f}%")
+                print(f"  Portfolio Hit Rate: {best_result['portfolio_hit_rate']:.2%}")
+                print(f"  Sharpe: {best_result['sharpe']:.3f}")
+
+        # Overall best by different criteria
+        print("\n" + "="*60)
+        print("OVERALL BEST CONFIGURATIONS")
+        print("="*60)
+
+        best_alpha = max(all_n_results, key=lambda x: x['avg_alpha'])
+        best_hit_rate = max(all_n_results, key=lambda x: x['portfolio_hit_rate'])
+        best_sharpe = max(all_n_results, key=lambda x: x['sharpe'])
+
+        print(f"\nBest Alpha:")
+        print(f"  N={best_alpha['n_satellites']}, Method={best_alpha['method']}")
+        print(f"  Alpha: {best_alpha['avg_alpha']*100:.2f}%")
+        print(f"  Portfolio Hit Rate: {best_alpha['portfolio_hit_rate']:.2%}")
+        print(f"  Sharpe: {best_alpha['sharpe']:.3f}")
+
+        print(f"\nBest Portfolio Hit Rate:")
+        print(f"  N={best_hit_rate['n_satellites']}, Method={best_hit_rate['method']}")
+        print(f"  Alpha: {best_hit_rate['avg_alpha']*100:.2f}%")
+        print(f"  Portfolio Hit Rate: {best_hit_rate['portfolio_hit_rate']:.2%}")
+        print(f"  Sharpe: {best_hit_rate['sharpe']:.3f}")
+
+        print(f"\nBest Sharpe Ratio:")
+        print(f"  N={best_sharpe['n_satellites']}, Method={best_sharpe['method']}")
+        print(f"  Alpha: {best_sharpe['avg_alpha']*100:.2f}%")
+        print(f"  Portfolio Hit Rate: {best_sharpe['portfolio_hit_rate']:.2%}")
+        print(f"  Sharpe: {best_sharpe['sharpe']:.3f}")
 
 
 if __name__ == '__main__':

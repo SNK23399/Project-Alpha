@@ -45,9 +45,14 @@ MIN_HISTORY_DAYS = 252
 # Number of CPU cores for parallel processing
 N_CORES = cpu_count()
 
-# Portfolio configuration
-N_SATELLITES = 4
+# Portfolio configuration - TEST MULTIPLE N VALUES
+N_SATELLITES_TO_TEST = [1, 2, 3, 4, 5, 6]  # Will run ensemble search for each N
 MIN_ETFS_PER_PERIOD = 50
+
+# Force recompute flags (set to True to ignore cached files)
+FORCE_RECOMPUTE_ALPHA = False     # Step 1: Forward alpha
+FORCE_RECOMPUTE_FEATURES = False  # Step 2: Feature metrics
+FORCE_RECOMPUTE_MATRIX = False    # Step 4: Rankings matrix
 
 # Feature pre-filtering thresholds
 TOP_N_FILTERED_FEATURES = 300  # Load top 300 filtered features by momentum alpha
@@ -96,6 +101,22 @@ def compute_forward_alpha(holding_months):
     print(f"\n{'='*60}")
     print(f"STEP 1: COMPUTE FORWARD ALPHA ({holding_months}-MONTH HORIZON)")
     print(f"{'='*60}")
+
+    # Check if already computed
+    output_dir = Path('data/feature_analysis')
+    alpha_file = output_dir / f'forward_alpha_{holding_months}month.parquet'
+
+    if alpha_file.exists() and not FORCE_RECOMPUTE_ALPHA:
+        print(f"\n[LOADING] Pre-computed forward alpha from {alpha_file}")
+        alpha_df = pd.read_parquet(alpha_file)
+        alpha_df['date'] = pd.to_datetime(alpha_df['date'])
+        print(f"  Observations: {len(alpha_df):,}")
+        print(f"  Dates: {alpha_df['date'].nunique()}")
+        print(f"  ISINs: {alpha_df['isin'].nunique()}")
+        print(f"  Mean alpha: {alpha_df['forward_alpha'].mean():.4f}")
+        return alpha_df
+
+    print(f"\n[COMPUTING] Forward alpha (this will be saved)...")
 
     # Generate monthly dates
     monthly_dates = get_monthly_dates()
@@ -444,11 +465,31 @@ def process_single_feature(args):
         return None
 
 
-def create_rankings_matrix(filtered_features, raw_signals, alpha_df, period_dates):
+def create_rankings_matrix(filtered_features, raw_signals, alpha_df, period_dates, holding_months):
     """Create a 3D matrix of rankings for all features (parallelized)."""
     print(f"\n{'='*60}")
     print(f"STEP 4: CREATE RANKINGS MATRIX (PARALLEL)")
     print(f"{'='*60}")
+
+    # Check if already computed
+    output_dir = Path('data/feature_analysis')
+    matrix_file = output_dir / f'rankings_matrix_{holding_months}month.npz'
+
+    if matrix_file.exists() and not FORCE_RECOMPUTE_MATRIX:
+        print(f"\n[LOADING] Pre-computed rankings matrix from {matrix_file}")
+        data = np.load(matrix_file, allow_pickle=True)
+        rankings_data = {
+            'rankings': data['rankings'],
+            'dates': pd.to_datetime(data['dates']),
+            'isins': data['isins'],
+            'features': data['features'].tolist() if isinstance(data['features'], np.ndarray) else data['features'],
+            'n_filtered': int(data['n_filtered'])
+        }
+        print(f"  Matrix shape: {rankings_data['rankings'].shape}")
+        print(f"  Non-NaN coverage: {(~np.isnan(rankings_data['rankings'])).sum() / rankings_data['rankings'].size * 100:.1f}%")
+        return rankings_data
+
+    print(f"\n[COMPUTING] Rankings matrix (this will be saved)...")
 
     # Get dimensions
     dates = sorted(period_dates)
@@ -534,9 +575,8 @@ def create_rankings_matrix(filtered_features, raw_signals, alpha_df, period_date
 # STEP 5: GREEDY ENSEMBLE SEARCH
 # ============================================================
 
-def evaluate_ensemble(rankings, dates, isins, feature_indices, alpha_df):
-    """Evaluate an ensemble of features."""
-    n_satellites = N_SATELLITES
+def evaluate_ensemble(rankings, dates, isins, feature_indices, alpha_df, n_satellites):
+    """Evaluate an ensemble of features for a given N."""
 
     # Average rankings across selected features
     ensemble_scores = np.nanmean(rankings[:, :, feature_indices], axis=2)
@@ -592,8 +632,8 @@ def evaluate_ensemble(rankings, dates, isins, feature_indices, alpha_df):
 
 def evaluate_single_feature_for_filtering(args):
     """Evaluate a single feature for pre-filtering (parallelizable)."""
-    feat_idx, rankings, dates, isins, alpha_df = args
-    perf = evaluate_ensemble(rankings, dates, isins, [feat_idx], alpha_df)
+    feat_idx, rankings, dates, isins, alpha_df, n_satellites = args
+    perf = evaluate_ensemble(rankings, dates, isins, [feat_idx], alpha_df, n_satellites)
 
     if perf is None:
         return None
@@ -609,8 +649,8 @@ def evaluate_single_feature_for_filtering(args):
 
 def check_inversion_needed(args):
     """Check if a feature needs inversion (parallelizable)."""
-    feat_idx, rankings, dates, isins, alpha_df = args
-    perf = evaluate_ensemble(rankings, dates, isins, [feat_idx], alpha_df)
+    feat_idx, rankings, dates, isins, alpha_df, n_satellites = args
+    perf = evaluate_ensemble(rankings, dates, isins, [feat_idx], alpha_df, n_satellites)
     if perf is not None and perf['avg_alpha'] < 0:
         return feat_idx
     return None
@@ -618,11 +658,11 @@ def check_inversion_needed(args):
 
 def evaluate_candidate_addition(args):
     """Evaluate adding one candidate to current ensemble (parallelizable)."""
-    feat_idx, current_indices, rankings, dates, isins, alpha_df, best_perf = args
+    feat_idx, current_indices, rankings, dates, isins, alpha_df, best_perf, n_satellites = args
 
     # Evaluate with this feature added
     test_indices = current_indices + [feat_idx]
-    perf = evaluate_ensemble(rankings, dates, isins, test_indices, alpha_df)
+    perf = evaluate_ensemble(rankings, dates, isins, test_indices, alpha_df, n_satellites)
 
     if perf is None:
         return None
@@ -637,10 +677,10 @@ def evaluate_candidate_addition(args):
     return (feat_idx, improvement, perf)
 
 
-def greedy_ensemble_search(rankings_data, alpha_df, holding_months):
+def greedy_ensemble_search(rankings_data, alpha_df, holding_months, n_satellites):
     """Greedy forward selection for optimal ensemble."""
     print(f"\n{'='*60}")
-    print(f"STEP 5: GREEDY ENSEMBLE SEARCH")
+    print(f"STEP 5: GREEDY ENSEMBLE SEARCH (N={n_satellites})")
     print(f"{'='*60}")
 
     rankings = rankings_data['rankings'].copy()  # Make a copy to allow modifications
@@ -657,7 +697,7 @@ def greedy_ensemble_search(rankings_data, alpha_df, holding_months):
 
     # Prepare arguments for parallel processing
     filter_args = [
-        (feat_idx, rankings, dates, isins, alpha_df)
+        (feat_idx, rankings, dates, isins, alpha_df, n_satellites)
         for feat_idx in range(len(feature_names))
     ]
 
@@ -696,7 +736,7 @@ def greedy_ensemble_search(rankings_data, alpha_df, holding_months):
     print("\nChecking which features need inversion...")
 
     inversion_args = [
-        (feat_idx, rankings, dates, isins, alpha_df)
+        (feat_idx, rankings, dates, isins, alpha_df, n_satellites)
         for feat_idx in candidate_indices
     ]
 
@@ -734,7 +774,7 @@ def greedy_ensemble_search(rankings_data, alpha_df, holding_months):
 
         # Prepare arguments for parallel evaluation
         eval_args = [
-            (feat_idx, current_indices, rankings, dates, isins, alpha_df, best_perf)
+            (feat_idx, current_indices, rankings, dates, isins, alpha_df, best_perf, n_satellites)
             for feat_idx in remaining
         ]
 
@@ -798,7 +838,7 @@ def greedy_ensemble_search(rankings_data, alpha_df, holding_months):
 # ============================================================
 
 def run_single_period(holding_months):
-    """Run the complete pipeline for a single holding period."""
+    """Run the pipeline for a single holding period, testing multiple N values."""
     print("="*60)
     print(f"FEATURE ANALYSIS PIPELINE - {holding_months} MONTH HOLDING PERIOD")
     print("="*60)
@@ -806,98 +846,125 @@ def run_single_period(holding_months):
     output_dir = Path('data/feature_analysis')
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Compute forward alpha
+    # Steps 1-4: N-INDEPENDENT (load from cache if available)
+    print("\n" + "="*60)
+    print("STEPS 1-4: N-INDEPENDENT DATA LOADING")
+    print("="*60)
+
+    # Step 1: Compute forward alpha (cached)
     alpha_df = compute_forward_alpha(holding_months)
-
     alpha_file = output_dir / f'forward_alpha_{holding_months}month.parquet'
-    alpha_df.to_parquet(alpha_file, index=False)
-    print(f"\n[SAVED] {alpha_file}")
+    if not alpha_file.exists() or FORCE_RECOMPUTE_ALPHA:
+        alpha_df.to_parquet(alpha_file, index=False)
+        print(f"\n[SAVED] {alpha_file}")
 
-    # Step 2: Evaluate features
+    # Step 2: Evaluate features (cached)
     feature_metrics = evaluate_features(alpha_df, holding_months)
-
     metrics_file = output_dir / f'feature_metrics_{holding_months}month.csv'
-    feature_metrics.to_csv(metrics_file, index=False)
-    print(f"\n[SAVED] {metrics_file}")
+    if not metrics_file.exists() or FORCE_RECOMPUTE_FEATURES:
+        feature_metrics.to_csv(metrics_file, index=False)
+        print(f"\n[SAVED] {metrics_file}")
 
     # Step 3: Pre-filter features and load raw signals
     filtered_features, raw_signals, period_dates = load_and_filter_features(
         feature_metrics, alpha_df
     )
 
-    # Step 4: Create rankings matrix
+    # Step 4: Create rankings matrix (cached)
     rankings_data = create_rankings_matrix(
-        filtered_features, raw_signals, alpha_df, period_dates
+        filtered_features, raw_signals, alpha_df, period_dates, holding_months
     )
-
     matrix_file = output_dir / f'rankings_matrix_{holding_months}month.npz'
-    np.savez_compressed(
-        matrix_file,
-        rankings=rankings_data['rankings'],
-        dates=rankings_data['dates'],
-        isins=rankings_data['isins'],
-        features=rankings_data['features'],
-        n_filtered=rankings_data['n_filtered']
-    )
-    print(f"\n[SAVED] {matrix_file}")
+    if not matrix_file.exists() or FORCE_RECOMPUTE_MATRIX:
+        np.savez_compressed(
+            matrix_file,
+            rankings=rankings_data['rankings'],
+            dates=rankings_data['dates'],
+            isins=rankings_data['isins'],
+            features=rankings_data['features'],
+            n_filtered=rankings_data['n_filtered']
+        )
+        print(f"\n[SAVED] {matrix_file}")
 
-    # Step 5: Greedy ensemble search
-    selected_features, final_perf = greedy_ensemble_search(
-        rankings_data, alpha_df, holding_months
-    )
+    # Step 5: Test multiple N values
+    print("\n" + "="*60)
+    print(f"STEP 5: ENSEMBLE SEARCH FOR MULTIPLE N VALUES")
+    print(f"Testing N = {N_SATELLITES_TO_TEST}")
+    print("="*60)
 
-    # Check if ensemble was found
-    if final_perf is None:
-        print(f"\nWARNING: No ensemble found for {holding_months}-month holding period")
+    all_results = []
+
+    for n in N_SATELLITES_TO_TEST:
+        print(f"\n{'#'*60}")
+        print(f"# N_SATELLITES = {n}")
+        print(f"{'#'*60}")
+
+        # Run greedy ensemble search for this N
+        selected_features, final_perf = greedy_ensemble_search(
+            rankings_data, alpha_df, holding_months, n
+        )
+
+        # Check if ensemble was found
+        if final_perf is None:
+            print(f"\nWARNING: No ensemble found for N={n}")
+            continue
+
+        # Save ensemble with N in filename
+        ensemble_data = []
+        for i, feat in enumerate(selected_features, 1):
+            ensemble_data.append({
+                'feature_name': feat['name'],
+                'feature_type': feat['type'],
+                'selection_order': i
+            })
+        ensemble_df = pd.DataFrame(ensemble_data)
+
+        ensemble_file = output_dir / f'ensemble_{holding_months}month_N{n}.csv'
+        ensemble_df.to_csv(ensemble_file, index=False)
+        print(f"\n[SAVED] {ensemble_file}")
+
+        # Save performance metrics with N
+        perf_df = pd.DataFrame([{
+            'holding_months': holding_months,
+            'n_satellites': n,
+            'n_features': len(selected_features),
+            'avg_alpha': final_perf['avg_alpha'],
+            'std_alpha': final_perf['std_alpha'],
+            'hit_rate': final_perf['hit_rate'],
+            'n_periods': final_perf['n_periods'],
+            'sharpe': final_perf['avg_alpha'] / final_perf['std_alpha'] if final_perf['std_alpha'] > 0 else 0
+        }])
+
+        perf_file = output_dir / f'ensemble_performance_{holding_months}month_N{n}.csv'
+        perf_df.to_csv(perf_file, index=False)
+        print(f"[SAVED] {perf_file}")
+
+        print(f"\nEnsemble: {len(selected_features)} features")
+        print(f"Alpha: {final_perf['avg_alpha']:.4f} ({final_perf['avg_alpha']*100:.2f}%)")
+        print(f"Hit rate: {final_perf['hit_rate']:.2%}")
+        print(f"Sharpe: {perf_df['sharpe'].iloc[0]:.3f}")
+
+        all_results.append(perf_df)
+
+    # Combine all results for this holding period
+    if len(all_results) > 0:
+        combined_df = pd.concat(all_results, ignore_index=True)
+        return combined_df
+    else:
         return None
-
-    # Save ensemble (convert from idx/name/type to feature_name/feature_type/selection_order)
-    ensemble_data = []
-    for i, feat in enumerate(selected_features, 1):
-        ensemble_data.append({
-            'feature_name': feat['name'],
-            'feature_type': feat['type'],
-            'selection_order': i
-        })
-    ensemble_df = pd.DataFrame(ensemble_data)
-
-    ensemble_file = output_dir / f'ensemble_{holding_months}month.csv'
-    ensemble_df.to_csv(ensemble_file, index=False)
-    print(f"\n[SAVED] {ensemble_file}")
-
-    # Save performance metrics
-    perf_df = pd.DataFrame([{
-        'holding_months': holding_months,
-        'n_features': len(selected_features),
-        'avg_alpha': final_perf['avg_alpha'],
-        'std_alpha': final_perf['std_alpha'],
-        'hit_rate': final_perf['hit_rate'],
-        'n_periods': final_perf['n_periods'],
-        'sharpe': final_perf['avg_alpha'] / final_perf['std_alpha'] if final_perf['std_alpha'] > 0 else 0
-    }])
-
-    perf_file = output_dir / f'ensemble_performance_{holding_months}month.csv'
-    perf_df.to_csv(perf_file, index=False)
-    print(f"\n[SAVED] {perf_file}")
-
-    print(f"\n{'='*60}")
-    print(f"[COMPLETE] {holding_months}-MONTH PIPELINE")
-    print(f"{'='*60}")
-    print(f"\nEnsemble: {len(selected_features)} features")
-    print(f"Alpha: {final_perf['avg_alpha']:.4f} ({final_perf['avg_alpha']*100:.2f}%)")
-    print(f"Hit rate: {final_perf['hit_rate']:.2%}")
-    print(f"Sharpe: {perf_df['sharpe'].iloc[0]:.3f}")
-
-    return perf_df
 
 
 def main():
-    """Run the complete pipeline for one or more holding periods."""
+    """Run the complete pipeline for multiple holding periods and N values."""
     # Convert HOLDING_MONTHS to list if it's a single integer
     holding_periods = HOLDING_MONTHS if isinstance(HOLDING_MONTHS, list) else [HOLDING_MONTHS]
 
     print("\n" + "="*60)
-    print(f"RUNNING FEATURE ANALYSIS FOR {len(holding_periods)} HOLDING PERIOD(S): {holding_periods}")
+    print(f"MULTI-N FEATURE ANALYSIS PIPELINE")
+    print("="*60)
+    print(f"\nHolding periods: {holding_periods}")
+    print(f"N values to test: {N_SATELLITES_TO_TEST}")
+    print(f"Total combinations: {len(holding_periods)} periods × {len(N_SATELLITES_TO_TEST)} N values = {len(holding_periods) * len(N_SATELLITES_TO_TEST)}")
     print("="*60 + "\n")
 
     # Run pipeline for each holding period
@@ -918,14 +985,30 @@ def main():
     # Save combined summary
     if len(all_results) > 0:
         summary_df = pd.concat(all_results, ignore_index=True)
-        summary_file = Path('data/feature_analysis') / 'all_periods_summary.csv'
+        summary_file = Path('data/feature_analysis') / 'multi_n_summary.csv'
         summary_df.to_csv(summary_file, index=False)
 
         print("\n" + "="*60)
-        print("SUMMARY OF ALL HOLDING PERIODS")
+        print("SUMMARY OF ALL N VALUES ACROSS ALL HOLDING PERIODS")
         print("="*60)
         print(summary_df.to_string(index=False))
         print(f"\n[SAVED] {summary_file}")
+
+        # Show best N per holding period
+        print("\n" + "="*60)
+        print("BEST N BY HOLDING PERIOD")
+        print("="*60)
+        for months in holding_periods:
+            period_data = summary_df[summary_df['holding_months'] == months]
+            if len(period_data) > 0:
+                best_alpha = period_data.loc[period_data['avg_alpha'].idxmax()]
+                best_hit = period_data.loc[period_data['hit_rate'].idxmax()]
+                best_sharpe = period_data.loc[period_data['sharpe'].idxmax()]
+
+                print(f"\n{months}-Month Horizon:")
+                print(f"  Best Alpha:     N={best_alpha['n_satellites']:.0f} ({best_alpha['avg_alpha']*100:.2f}%)")
+                print(f"  Best Hit Rate:  N={best_hit['n_satellites']:.0f} ({best_hit['hit_rate']*100:.2f}%)")
+                print(f"  Best Sharpe:    N={best_sharpe['n_satellites']:.0f} ({best_sharpe['sharpe']:.3f})")
 
 
 if __name__ == '__main__':
