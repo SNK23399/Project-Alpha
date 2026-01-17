@@ -88,11 +88,28 @@ OUTPUT_DIR = Path(__file__).parent / 'data'
 # STEP 1: COMPUTE FORWARD ALPHA (OPTIMIZED)
 # ============================================================
 
-def get_monthly_dates(start_year=2015, end_year=2024):
-    """Generate end-of-month dates for all months using pandas (faster)."""
+def get_monthly_dates(start_date=None, end_date=None):
+    """
+    Generate end-of-month dates using pandas.
+
+    If start_date/end_date not provided, uses reasonable defaults.
+    Dates can be datetime objects, strings, or year integers.
+    """
+    # Handle defaults
+    if start_date is None:
+        start_date = '2015-01-01'
+    elif isinstance(start_date, int):
+        start_date = f'{start_date}-01-01'
+
+    if end_date is None:
+        # Default to current date
+        end_date = pd.Timestamp.now()
+    elif isinstance(end_date, int):
+        end_date = f'{end_date}-12-31'
+
     return pd.date_range(
-        start=f'{start_year}-01-01',
-        end=f'{end_year}-12-31',
+        start=start_date,
+        end=end_date,
         freq='ME'  # Month End
     ).tolist()
 
@@ -149,12 +166,7 @@ def compute_forward_alpha(holding_months):
 
     print(f"\n[COMPUTING] Forward alpha (optimized)...")
 
-    # Generate monthly dates
-    monthly_dates = get_monthly_dates()
-    monthly_dates_arr = np.array(monthly_dates, dtype='datetime64[ns]')
-    print(f"\nGenerated {len(monthly_dates)} monthly dates")
-
-    # Load ETF prices in parallel
+    # Load ETF prices in parallel FIRST (to determine date range)
     db = ETFDatabase()
     universe_df = db.load_universe()
     etf_list = universe_df['isin'].tolist()
@@ -182,6 +194,17 @@ def compute_forward_alpha(holding_months):
     price_df = pd.DataFrame(prices)
     price_df.index = pd.to_datetime(price_df.index)
     price_df = price_df.sort_index()
+
+    # Generate monthly dates ADAPTIVELY based on actual data range
+    data_start = price_df.index.min()
+    data_end = price_df.index.max()
+    print(f"\nData range: {data_start.date()} to {data_end.date()}")
+
+    # Start from 2015 or data start (whichever is later), end at data end
+    start_date = max(pd.Timestamp('2015-01-01'), data_start)
+    monthly_dates = get_monthly_dates(start_date=start_date, end_date=data_end)
+    monthly_dates_arr = np.array(monthly_dates, dtype='datetime64[ns]')
+    print(f"Generated {len(monthly_dates)} monthly dates ({monthly_dates[0].date()} to {monthly_dates[-1].date()})")
 
     # Get trading dates
     trading_dates = price_df.index.values
