@@ -211,11 +211,15 @@ def compare_databases(old_db_path=None, new_db_path=None):
                 diff = np.abs(old_vals - new_vals)
                 max_diff = diff.max()
 
+                # Count dates with differences > 0.01 EUR
+                dates_with_diff = (diff > 0.01).sum()
+
                 # Flag if difference > 0.01 EUR (1 cent)
                 if max_diff > 0.01:
                     mismatches.append({
                         'isin': isin,
                         'common_dates': len(common_dates),
+                        'dates_with_diff': dates_with_diff,
                         'max_diff': max_diff,
                         'sample_dates': common_dates[:3].tolist()
                     })
@@ -229,10 +233,9 @@ def compare_databases(old_db_path=None, new_db_path=None):
 
     if mismatches:
         print(f"\n[WARN] Found {len(mismatches)} ETFs with price mismatches (>0.01 EUR):")
-        for m in mismatches[:5]:
-            print(f"  {m['isin']}: max diff = €{m['max_diff']:.4f} over {m['common_dates']} dates")
-        if len(mismatches) > 5:
-            print(f"  ... and {len(mismatches) - 5} more")
+        for m in mismatches:
+            print(f"  {m['isin']}: max diff = €{m['max_diff']:.4f}, {m['dates_with_diff']} dates differ (of {m['common_dates']} total)")
+        print(f"\n  Note: Small price differences are normal due to NAV data source updates.")
     else:
         print(f"[OK] No significant price mismatches found in sample")
 
@@ -323,35 +326,36 @@ def compare_databases(old_db_path=None, new_db_path=None):
         print(f"  [OK] Prices match in overlap period")
         print(f"  [OK] Pre-core data correctly filtered")
         print(f"  [OK] Reduced size by {abs(size_diff):.1f} MB")
+
+    print()
+    print("=" * 80)
+    print()
+
+    # Always prompt user to replace (even with warnings - user can decide)
+    response = input("Replace old database with new one? (y/n): ").strip().lower()
+    if response == 'y':
+        import shutil
+        from datetime import datetime
+
+        # Create backups directory if needed
+        backup_dir = Path(old_db_path).parent / "backups"
+        backup_dir.mkdir(exist_ok=True)
+
+        # Backup old database with date stamp
+        date_stamp = datetime.now().strftime("%Y-%m-%d")
+        backup_name = f"etf_database_{date_stamp}.db"
+        backup_path = backup_dir / backup_name
+        shutil.copy2(old_db_path, backup_path)
+        print(f"  Backed up old database to: {backup_path}")
+
+        # Replace with new database
+        shutil.move(new_db_path, old_db_path)
+        print(f"  Replaced {old_db_path} with new database")
         print()
-        print("=" * 80)
-        print()
-
-        # Prompt user to replace
-        response = input("Replace old database with new one? (y/n): ").strip().lower()
-        if response == 'y':
-            import shutil
-            from datetime import datetime
-
-            # Create backups directory if needed
-            backup_dir = Path(old_db_path).parent / "backups"
-            backup_dir.mkdir(exist_ok=True)
-
-            # Backup old database with date stamp
-            date_stamp = datetime.now().strftime("%Y-%m-%d")
-            backup_name = f"etf_database_{date_stamp}.db"
-            backup_path = backup_dir / backup_name
-            shutil.copy2(old_db_path, backup_path)
-            print(f"  Backed up old database to: {backup_path}")
-
-            # Replace with new database
-            shutil.move(new_db_path, old_db_path)
-            print(f"  Replaced {old_db_path} with new database")
-            print()
-            print("[OK] Database replacement complete!")
-        else:
-            print("  Skipped. You can manually replace with:")
-            print(f"    mv {new_db_path} {old_db_path}")
+        print("[OK] Database replacement complete!")
+    else:
+        print("  Skipped. You can manually replace with:")
+        print(f"    mv {new_db_path} {old_db_path}")
 
     print("=" * 80)
 

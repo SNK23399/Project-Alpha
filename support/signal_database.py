@@ -212,8 +212,8 @@ class SignalDatabase:
         return signals
 
     def get_available_signals(self) -> List[str]:
-        """Get list of available signal base names."""
-        return [f.stem for f in self.signal_bases_dir.glob("*.parquet")]
+        """Get list of available signal base names (sorted for determinism)."""
+        return sorted([f.stem for f in self.signal_bases_dir.glob("*.parquet")])
 
     def get_completed_signals(self) -> set:
         """Get set of signal names already saved (for resume capability)."""

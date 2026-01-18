@@ -149,8 +149,8 @@ def main():
     # Initialize database
     signal_db = SignalDatabase(SIGNAL_OUTPUT_DIR)
 
-    # Get base signals
-    base_signal_names = list(signal_db.get_completed_signals())
+    # Get base signals (sorted for deterministic ordering)
+    base_signal_names = sorted(signal_db.get_completed_signals())
 
     if not base_signal_names:
         print("\nERROR: No base signals found!")

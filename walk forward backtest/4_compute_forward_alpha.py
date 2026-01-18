@@ -82,6 +82,9 @@ FORCE_RECOMPUTE = False
 # Output directory (relative to this script's location)
 OUTPUT_DIR = Path(__file__).parent / 'data'
 
+# Signal directory (where scripts 1-3 store signals)
+SIGNAL_DIR = Path(__file__).parent / 'data' / 'signals'
+
 
 # ============================================================
 # STEP 1: COMPUTE FORWARD ALPHA (OPTIMIZED)
@@ -246,27 +249,11 @@ def compute_forward_alpha(horizon):
     # Find actual trading dates for each monthly date using searchsorted
     # searchsorted finds where each monthly_date would be inserted to maintain order
     # We want the first trading date >= monthly_date
-    print(f"\nMapping dates to trading dates...")
+    print(f"\nMapping monthly dates to trading dates...")
 
-    # Get start indices (monthly dates mapped to trading dates)
-    start_indices = np.searchsorted(trading_dates, monthly_dates_arr)
-
-    if horizon_unit == 'month':
-        # Monthly horizon: offset by N months in the monthly_dates array
-        # Use all monthly dates except the last N
-        valid_start_mask = np.arange(len(monthly_dates)) < len(monthly_dates) - horizon_value
-        start_indices = start_indices[valid_start_mask]
-
-        # End indices come from monthly dates offset by horizon_value months
-        end_monthly_indices = np.arange(horizon_value, len(monthly_dates))
-        end_indices = np.searchsorted(trading_dates, monthly_dates_arr[end_monthly_indices])
-    else:
-        # Daily horizon: offset by N trading days from each start date
-        # Use all monthly dates where start + N days is still within bounds
-        end_indices = start_indices + horizon_value
-        valid_mask = end_indices < len(trading_dates)
-        start_indices = start_indices[valid_mask]
-        end_indices = end_indices[valid_mask]
+    # Original simple logic for monthly horizons (restored from daa303b)
+    start_indices = np.searchsorted(trading_dates, monthly_dates_arr[:-horizon_value])
+    end_indices = np.searchsorted(trading_dates, monthly_dates_arr[horizon_value:])
 
     # Filter valid indices (within bounds)
     valid_mask = (start_indices < len(trading_dates)) & (end_indices < len(trading_dates))
@@ -376,7 +363,7 @@ def process_single_feature(args):
     """
     feature_name, is_filtered, target_dates_arr, date_to_idx, isin_to_idx = args
 
-    db = SignalDatabase()
+    db = SignalDatabase(SIGNAL_DIR)
 
     try:
         if is_filtered:
@@ -509,9 +496,10 @@ def create_rankings_matrix(alpha_df, horizon):
 
     if feature_metrics is None:
         # Fall back to loading all signals
-        db = SignalDatabase()
-        filtered_signals = list(db.get_completed_filtered_signals())
-        raw_signals = db.get_available_signals()
+        db = SignalDatabase(SIGNAL_DIR)
+        # Sort for deterministic ordering (set iteration order is non-deterministic)
+        filtered_signals = sorted(db.get_completed_filtered_signals())
+        raw_signals = db.get_available_signals()  # Already sorted in signal_database.py
 
         # Create minimal dataframes
         filtered_features = pd.DataFrame({
