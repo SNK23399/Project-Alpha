@@ -1,4 +1,48 @@
 \section{Related Work}
 \label{sec:related_work}
 
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+This section reviews the academic and practitioner literature relevant to our signal-based core-satellite strategy.
+
+\subsection{Core-Satellite Portfolio Construction}
+
+The core-satellite approach to portfolio management combines passive index investing with active satellite positions. Amenc et al. (2004) formalized the framework, showing that it allows investors to control tracking error while seeking alpha. Leibowitz and Bova (2005) demonstrated that core-satellite portfolios can achieve better risk-adjusted returns than purely passive or purely active approaches.
+
+Our implementation extends this framework by using systematic signal-based selection for the satellite component, replacing discretionary active management with quantitative methods.
+
+\subsection{Momentum and Mean Reversion}
+
+The momentum effect---the tendency of past winners to continue outperforming---is one of the most robust findings in empirical finance. Jegadeesh and Titman (1993) documented momentum profits at 3--12 month horizons. Asness et al. (2013) showed momentum exists across asset classes including equities, bonds, currencies, and commodities.
+
+Mean reversion, conversely, suggests that assets that have underperformed will subsequently recover. Poterba and Summers (1988) found evidence of mean reversion at longer horizons. De Bondt and Thaler (1985) documented that extreme losers outperform extreme winners over 3--5 year periods.
+
+Our signal framework captures both phenomena through dedicated momentum and mean reversion signals, allowing the data to determine which approach works for each signal type.
+
+\subsection{Technical Analysis and Signal Processing}
+
+Technical analysis uses price and volume patterns to predict future returns. While controversial in academic circles, several studies have documented its profitability. Lo et al. (2000) found that technical patterns have predictive power after controlling for transaction costs.
+
+Our approach differs from traditional technical analysis by systematically evaluating thousands of signal-filter-indicator combinations rather than relying on discretionary pattern recognition. The use of causal filters from signal processing (Butterworth, Kalman, Savitzky-Golay) provides more rigorous noise reduction than traditional moving averages.
+
+\subsection{Factor Investing}
+
+Factor investing systematically targets sources of return such as value, momentum, quality, and low volatility. Fama and French (1993) introduced the three-factor model; subsequent work added momentum (Carhart, 1997), profitability, and investment factors (Fama and French, 2015).
+
+Our ETF-based approach provides access to factor exposures through sector and regional ETFs without requiring stock-level data or the capital needed for direct factor portfolio construction.
+
+\subsection{Information Coefficient and Feature Selection}
+
+The Information Coefficient (IC), defined as the rank correlation between predicted and realized returns, is a standard metric for evaluating alpha signals (Grinold and Kahn, 2000). IC weighting for combining signals was explored by Qian et al. (2007), who showed that weighting by historical IC improves ensemble performance.
+
+Our implementation applies IC weighting to feature ensembles, dynamically adjusting weights based on rolling 12-month IC to adapt to changing market conditions.
+
+\subsection{Statistical Significance in Backtesting}
+
+The importance of statistical significance in evaluating trading strategies has been emphasized by Harvey et al. (2016), who argued that many published anomalies are likely false discoveries due to data mining. Bailey et al. (2014) introduced methods for adjusting p-values when multiple strategies are tested.
+
+We address these concerns by applying paired t-tests, Wilcoxon signed-rank tests, bootstrap confidence intervals, and Bonferroni correction for multiple comparisons. This rigorous approach reduces the risk of implementing strategies that will not persist out-of-sample.
+
+\subsection{Walk-Forward Validation}
+
+Walk-forward testing, also known as rolling-window or expanding-window validation, is the standard method for evaluating trading strategies without look-ahead bias. Pardo (2008) provided a comprehensive treatment of walk-forward optimization in trading system development.
+
+Our implementation uses strict walk-forward testing with monthly rebalancing, ensuring that all signals are computed using only data available at the time of each decision.

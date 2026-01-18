@@ -1,4 +1,92 @@
 \section{Discussion}
 \label{sec:discussion}
 
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+This section interprets the key findings from our walk-forward backtest and addresses important considerations for practical implementation.
+
+\subsection{Why IC Weighting Works}
+
+The Information Coefficient (IC) weighting mechanism achieved the only statistically significant improvement over the baseline. Several factors explain its effectiveness:
+
+\textbf{Adaptive feature selection:} IC weighting naturally emphasizes features that have been predictive in recent history. Markets are non-stationary, and the features that predict alpha may change over time. By weighting features by their rolling IC, the ensemble adapts to current market conditions.
+
+\textbf{Noise reduction:} Equal weighting treats all features identically, including those with weak or negative predictive power. IC weighting down-weights noisy features, effectively filtering the signal from the noise.
+
+\textbf{Robustness to overfitting:} Rather than selecting a single ``best'' feature (which risks overfitting), IC weighting combines many features while emphasizing those with proven track records. This provides diversification across signal sources.
+
+\subsection{Why Dynamic N Failed Significance Tests}
+
+Despite showing higher raw alpha in backtests, Dynamic N selection did not achieve statistical significance. The key reasons are:
+
+\textbf{Increased variance:} Dynamic N introduces additional variability in portfolio composition. When signal confidence is low, selecting fewer satellites increases concentration risk. When confidence is high, selecting more satellites dilutes alpha. This variability inflates the standard error of alpha estimates.
+
+\textbf{Risk-return trade-off:} The apparent alpha improvement (+0.96\% annualized) comes with doubled maximum drawdown ($-15.2\%$ vs $-7.3\%$). On a risk-adjusted basis, the improvement is less compelling.
+
+\textbf{Multiple comparisons:} When testing multiple Dynamic N variants (Original, Floor-2, Floor-3, VeryConservative), Bonferroni correction requires $p < 0.01$ for significance. None of the variants meet this threshold.
+
+\textbf{Practical implication:} Given the lack of statistical significance and increased risk, we recommend the simpler IC-weighted approach with fixed N=5.
+
+\subsection{The Importance of Statistical Testing}
+
+A key contribution of this work is the application of rigorous statistical testing to strategy development. Without such testing, one might conclude that Dynamic N or other improvements are beneficial based solely on backtest performance.
+
+The statistical tests reveal that:
+\begin{itemize}
+    \item Only 1 of 6 tested improvements (IC weighting) achieves significance at the 5\% level
+    \item Backtest alpha can be misleading without significance testing
+    \item Multiple comparison correction is essential when testing many strategies
+    \item Bootstrap confidence intervals provide intuitive interpretation of uncertainty
+\end{itemize}
+
+This approach guards against overfitting and increases confidence that the selected strategy will perform well out-of-sample.
+
+\subsection{Robustness Considerations}
+
+The sub-period analysis provides strong evidence that results are not driven by early luck:
+
+\textbf{Temporal consistency:} Alpha is positive in all 10 years tested, with no year showing underperformance versus baseline. This rules out the hypothesis that cumulative alpha is driven by a few exceptional years.
+
+\textbf{No degradation over time:} The late period (2021--2025) actually shows slightly higher alpha than earlier periods. This suggests the strategy is not suffering from alpha decay as more market participants adopt similar approaches.
+
+\textbf{Rolling window analysis:} Positive rolling alpha 87.4\% of the time indicates consistent outperformance rather than occasional large gains offsetting frequent small losses.
+
+\subsection{Limitations}
+
+Several limitations should be acknowledged:
+
+\textbf{Sample period:} While 120+ months provides reasonable statistical power, it represents only about 10 years of market history. The strategy has not been tested through all possible market regimes (e.g., prolonged bear markets, inflationary periods).
+
+\textbf{Transaction costs:} We assume EUR 1--3 per trade, which is realistic for European retail investors using low-cost brokers. Higher transaction costs would reduce net alpha.
+
+\textbf{Market impact:} With monthly rebalancing of 5 satellites, each representing 8\% of portfolio value, market impact should be negligible for portfolios under EUR 1 million. Larger portfolios may experience some slippage.
+
+\textbf{Survivorship bias:} Our ETF universe consists of currently available ETFs. ETFs that were delisted may not be fully represented, potentially introducing survivorship bias.
+
+\textbf{Data snooping:} Despite walk-forward testing, the choice of signal bases, filters, and indicators was informed by domain knowledge of what has worked historically. True out-of-sample testing would require implementing the strategy prospectively.
+
+\subsection{Comparison with Alternative Approaches}
+
+Our signal-based approach differs from common alternatives:
+
+\textbf{Factor investing:} Academic factor portfolios (value, momentum, quality) typically use stock-level data and require significant capital. Our ETF-based approach is more accessible to retail investors.
+
+\textbf{Technical analysis:} Traditional technical analysis relies on discretionary pattern recognition. Our approach systematically evaluates thousands of signal combinations and applies statistical testing.
+
+\textbf{Machine learning:} More complex ML models (neural networks, gradient boosting) could potentially capture non-linear relationships. However, they require more data to avoid overfitting and are less interpretable. The linear IC-weighting approach provides a good balance of performance and transparency.
+
+\subsection{Implementation Recommendations}
+
+Based on our findings, we recommend the following implementation:
+
+\begin{enumerate}
+    \item \textbf{Use IC-weighted ensemble:} Weight features by their rolling 12-month IC when computing ensemble scores.
+
+    \item \textbf{Fix N=5:} Select exactly 5 satellites per month, avoiding dynamic adjustment.
+
+    \item \textbf{Maintain 60/40 allocation:} Keep 60\% in ACWI core, 40\% in satellites (8\% each).
+
+    \item \textbf{Rebalance monthly:} Execute on the last trading day of each month.
+
+    \item \textbf{Monitor performance:} Track rolling alpha and hit rate to detect potential strategy degradation.
+
+    \item \textbf{Avoid over-optimization:} Resist the temptation to add complexity without statistical evidence of improvement.
+\end{enumerate}

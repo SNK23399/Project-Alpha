@@ -163,62 +163,72 @@ Beyond the cross-sectional indicators described above, we apply normalization to
 \subsection{Portfolio Strategy Implementation}
 \label{subsec:strategy}
 
-Our implementation translates the feature framework into an actionable portfolio strategy through a systematic quarterly rebalancing process.
+Our implementation translates the feature framework into an actionable portfolio strategy through a systematic monthly rebalancing process.
 
-\subsubsection{Target Variable: 3-Month Forward Alpha}
+\subsubsection{Target Variable: 1-Month Forward Alpha}
 
-The fundamental prediction task is identifying ETFs that will generate positive alpha over the next 3 months (63 trading days). For each ETF $i$ at time $t$, we define:
+The fundamental prediction task is identifying ETFs that will generate positive alpha over the next month (approximately 21 trading days). For each ETF $i$ at time $t$, we define:
 \begin{equation}
-    \alpha_{i,t+63}^{(fwd)} = \frac{P_{i,t+63}}{P_{i,t}} - \frac{P_{c,t+63}}{P_{c,t}}
+    \alpha_{i,t+21}^{(fwd)} = \frac{P_{i,t+21}}{P_{i,t}} - \frac{P_{c,t+21}}{P_{c,t}}
 \end{equation}
 where $P_{i,t}$ is the ETF price and $P_{c,t}$ is the core benchmark (ACWI) price. This measures excess return over the benchmark during the holding period.
 
-The 3-month horizon aligns with several considerations: it is long enough to allow technical signals to materialize while being short enough to adapt to changing market conditions; it corresponds to quarterly rebalancing frequency, minimizing transaction costs; and academic research suggests 3-6 month horizons are optimal for momentum and technical strategies \cite{jegadeesh1993returns}.
+The 1-month horizon was selected after testing horizons from 1 to 12 months. Shorter horizons provide more frequent rebalancing opportunities and more data points for statistical analysis (120+ monthly observations versus 40 quarterly observations), while still allowing sufficient time for signals to materialize.
 
 \subsubsection{Portfolio Construction}
 
 The portfolio maintains a fixed core-satellite allocation:
 \begin{itemize}
     \item \textbf{Core (60\%):} Constant allocation to iShares Core MSCI World (ISIN: IE00B4L5Y983)
-    \item \textbf{Satellites (40\%):} Distributed equally across $N \in \{3, 4, 5\}$ selected ETFs
+    \item \textbf{Satellites (40\%):} Distributed equally across $N = 5$ selected ETFs (8\% each)
 \end{itemize}
 
-At each quarterly rebalancing date, we:
+The choice of $N=5$ satellites was determined through systematic analysis across $N \in \{1, 2, \ldots, 10\}$. We found that $N=5$ provides the optimal balance between concentration (higher alpha per position) and diversification (reduced idiosyncratic risk).
+
+At each monthly rebalancing date, we:
 \begin{enumerate}
     \item Compute all features for all ETFs using data up to (but not including) the rebalancing date
-    \item Rank ETFs by the selected feature(s)
-    \item Select the top $N$ ETFs (or bottom $N$ for mean reversion strategies)
+    \item Compute IC-weighted ensemble scores for each ETF based on top-performing features
+    \item Select the top $N=5$ ETFs by ensemble score
     \item Execute full rebalancing: sell all current satellites, adjust core to 60\% of total portfolio value, distribute 40\% equally across new satellites
-    \item Hold positions for 3 months until next rebalancing
+    \item Hold positions for 1 month until next rebalancing
 \end{enumerate}
+
+\subsubsection{IC-Weighted Feature Ensemble}
+
+Rather than relying on a single feature, we combine multiple top-performing features using Information Coefficient (IC) weighting. For each feature $f$, we compute its rolling IC over the past 12 months. Features with higher IC receive proportionally higher weight in the ensemble score:
+\begin{equation}
+    \text{Score}_i = \sum_{f} IC_f \cdot \text{rank}_{i,f}
+\end{equation}
+where $\text{rank}_{i,f}$ is ETF $i$'s percentile rank on feature $f$. This approach was the only improvement to achieve statistical significance (p = 0.047) in our testing.
 
 \subsubsection{Profit Locking Mechanism}
 
-A key innovation is the automatic risk-reduction through profit locking. When satellites outperform, their portfolio weight naturally increases beyond the 40\% target. Quarterly rebalancing mechanically sells this excess to restore the 60/40 ratio, thereby transferring gains from tactical positions into the stable core.
+A key innovation is the automatic risk-reduction through profit locking. When satellites outperform, their portfolio weight naturally increases beyond the 40\% target. Monthly rebalancing mechanically sells this excess to restore the 60/40 ratio, thereby transferring gains from tactical positions into the stable core.
 
-Example: Starting with EUR 50,000 (EUR 30,000 core, EUR 20,000 satellites), suppose satellites gain 20\% while core gains 5\% over 3 months. The portfolio grows to EUR 31,500 core + EUR 24,000 satellites = EUR 55,500 total. Rebalancing targets 60\% = EUR 33,300 core and 40\% = EUR 22,200 satellites, requiring EUR 1,800 in satellite profits to be locked into the core.
+Example: Starting with EUR 50,000 (EUR 30,000 core, EUR 20,000 satellites), suppose satellites gain 10\% while core gains 2\% over 1 month. The portfolio grows to EUR 30,600 core + EUR 22,000 satellites = EUR 52,600 total. Rebalancing targets 60\% = EUR 31,560 core and 40\% = EUR 21,040 satellites, requiring EUR 960 in satellite profits to be locked into the core.
 
 This creates a convex payoff structure: gains are systematically captured in low-risk assets, while losses trigger increased satellite allocation at lower valuations (potentially beneficial for mean reversion).
 
 \subsubsection{Monthly Contributions}
 
-Between quarterly rebalances, monthly contributions of EUR 1,000 are split 60/40 and added to existing positions proportionally. No trading occurs during these months—contributions simply dollar-cost-average into current holdings. This reduces timing risk and transaction costs while maintaining the target allocation.
+Monthly contributions of EUR 1,000 are split 60/40 and added during the monthly rebalancing process. This implements dollar-cost averaging while maintaining the target allocation without additional trading.
 
 \subsection{Feature Discovery and Selection}
 \label{subsec:selection}
 
-Given the large feature space (112,725 features), systematic evaluation is essential. We compute predictive metrics on a walk-forward quarterly basis to identify features with genuine alpha-generation capability.
+Given the large feature space (112,725 features), systematic evaluation is essential. We compute predictive metrics on a walk-forward monthly basis to identify features with genuine alpha-generation capability.
 
 \subsubsection{Information Coefficient (IC)}
 
-The primary metric is the Information Coefficient, defined as the Spearman rank correlation between feature values and subsequent 3-month alpha:
+The primary metric is the Information Coefficient, defined as the Spearman rank correlation between feature values and subsequent 1-month alpha:
 \begin{equation}
-    IC_t = \text{corr}_{\text{Spearman}}(\{f_{i,t}\}_{i=1}^{N_{ETF}}, \{\alpha_{i,t+63}^{(fwd)}\}_{i=1}^{N_{ETF}})
+    IC_t = \text{corr}_{\text{Spearman}}(\{f_{i,t}\}_{i=1}^{N_{ETF}}, \{\alpha_{i,t+21}^{(fwd)}\}_{i=1}^{N_{ETF}})
 \end{equation}
 
-IC directly measures a feature's ability to rank ETFs by future performance. Positive IC indicates momentum (higher feature values → higher future alpha), while negative IC indicates mean reversion (lower feature values → higher future alpha).
+IC directly measures a feature's ability to rank ETFs by future performance. Positive IC indicates momentum (higher feature values lead to higher future alpha), while negative IC indicates mean reversion (lower feature values lead to higher future alpha).
 
-We compute IC at each quarterly rebalancing date over the full history, yielding a time series $\{IC_t\}$. The mean IC indicates average predictive power:
+We compute IC at each monthly rebalancing date over the full history, yielding a time series $\{IC_t\}$. The mean IC indicates average predictive power:
 \begin{equation}
     \overline{IC} = \frac{1}{T}\sum_{t=1}^{T} IC_t
 \end{equation}
@@ -234,16 +244,16 @@ High IR indicates stable predictive power across different market regimes. Typic
 
 Beyond correlation, we evaluate actual selection outcomes:
 
-\textbf{Average alpha:} The mean 3-month alpha achieved by selecting the top $N$ ETFs by feature value:
+\textbf{Average alpha:} The mean 1-month alpha achieved by selecting the top $N$ ETFs by feature value:
 \begin{equation}
-    \overline{\alpha}_{\text{top-N}} = \frac{1}{T}\sum_{t=1}^{T}\left(\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+63}^{(fwd)}\right)
+    \overline{\alpha}_{\text{top-N}} = \frac{1}{T}\sum_{t=1}^{T}\left(\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+21}^{(fwd)}\right)
 \end{equation}
 
 This directly measures the strategy's return generation.
 
-\textbf{Hit rate:} The fraction of quarters where top-$N$ selection generates positive alpha:
+\textbf{Hit rate:} The fraction of months where top-$N$ selection generates positive alpha:
 \begin{equation}
-    \text{Hit Rate} = \frac{1}{T}\sum_{t=1}^{T} \mathbb{1}\left[\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+63}^{(fwd)} > 0\right]
+    \text{Hit Rate} = \frac{1}{T}\sum_{t=1}^{T} \mathbb{1}\left[\frac{1}{N}\sum_{i \in \text{Top-N}_t} \alpha_{i,t+21}^{(fwd)} > 0\right]
 \end{equation}
 
 High hit rates ($>60\%$) indicate consistent rather than sporadic outperformance.
@@ -281,9 +291,34 @@ The top-performing features are candidates for portfolio implementation. We also
 
 To obtain realistic performance estimates, we employ strict walk-forward backtesting. On each monthly rebalancing date, signals are computed using only data available up to that point. The selection algorithm ranks ETFs and chooses satellites based solely on historical information. Performance is then measured over the subsequent month on data unseen during signal computation.
 
-This methodology prevents look-ahead bias and data snooping, ensuring that reported performance reflects what an investor could have actually achieved in real-time. We use a 252-day (one year) lookback for signal computation, monthly rebalancing on the last trading day of each month, and select $k=4$ satellite ETFs per rebalancing.
+This methodology prevents look-ahead bias and data snooping, ensuring that reported performance reflects what an investor could have actually achieved in real-time. We use a 252-day (one year) lookback for signal computation, monthly rebalancing on the last trading day of each month, and select $N=5$ satellite ETFs per rebalancing.
 
 All filters are strictly causal---the Savitzky-Golay filter, for example, uses the \emph{origin} parameter to ensure only past points contribute to each output. This attention to causality is critical; non-causal filters can show artificially inflated performance by implicitly using future information.
+
+\subsection{Statistical Significance Testing}
+\label{subsec:significance}
+
+A key contribution of this work is the application of rigorous statistical testing to distinguish genuine alpha sources from noise. Given the large number of features and potential strategy improvements tested, we apply multiple statistical tests:
+
+\subsubsection{Paired t-test}
+
+For each strategy improvement, we compute the paired t-test against the baseline:
+\begin{equation}
+    t = \frac{\bar{d}}{s_d / \sqrt{n}}
+\end{equation}
+where $\bar{d}$ is the mean difference in monthly alpha, $s_d$ is the standard deviation of differences, and $n$ is the number of monthly observations. We require $p < 0.05$ for statistical significance.
+
+\subsubsection{Wilcoxon Signed-Rank Test}
+
+As a non-parametric alternative that does not assume normality, we also apply the Wilcoxon signed-rank test to verify results.
+
+\subsubsection{Bootstrap Confidence Intervals}
+
+We compute 95\% bootstrap confidence intervals for the mean alpha difference using 10,000 resamples. An improvement is considered significant if the confidence interval does not include zero.
+
+\subsubsection{Bonferroni Correction}
+
+When testing multiple strategy improvements simultaneously, we apply Bonferroni correction to control the family-wise error rate. With $k$ tests, we require $p < 0.05/k$ for significance.
 
 \subsection{Performance Evaluation}
 \label{subsec:metrics}

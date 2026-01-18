@@ -62,12 +62,16 @@ except ImportError:
 # N values to precompute (1-10)
 N_SATELLITES_MAX = 10
 
-# Horizons to compute (list of months)
-# Set to single value [1] for original behavior, or multiple [1,2,3,4,5,6] for multi-horizon
-HORIZONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+# Horizon configuration
+# Testing showed: multi-month horizons (2-12) and daily confirmations (5d, 10d, 15d)
+# provided NO statistically significant improvement over single 1-month horizon.
+# Keeping only 1-month for simplicity and computation speed.
+HOLDING_MONTHS = 1
 
-# Default holding period (used if HORIZONS is empty or for backward compatibility)
-DEFAULT_HOLDING_MONTHS = 1
+
+def get_horizon_label(horizon):
+    """Get a label string for a horizon (for filenames)."""
+    return f"{horizon}month"
 
 # Force recompute
 FORCE_RECOMPUTE = False
@@ -291,14 +295,16 @@ def _compute_all_dates_numpy(rankings, alpha_matrix, alpha_valid_matrix, n_satel
 # DATA LOADING AND PREPARATION
 # ============================================================
 
-def load_data(holding_months):
+def load_data(horizon):
     """Load forward alpha and rankings matrix."""
+    horizon_label = get_horizon_label(horizon)
+
     print(f"\n{'='*60}")
     print(f"LOADING DATA")
     print(f"{'='*60}")
 
     # Load forward alpha
-    alpha_file = OUTPUT_DIR / f'forward_alpha_{holding_months}month.parquet'
+    alpha_file = OUTPUT_DIR / f'forward_alpha_{horizon_label}.parquet'
     if not alpha_file.exists():
         raise FileNotFoundError(f"Forward alpha not found: {alpha_file}\nRun 4_compute_forward_alpha.py first.")
 
@@ -308,7 +314,7 @@ def load_data(holding_months):
     print(f"\n[OK] Forward alpha loaded ({len(alpha_df):,} observations)")
 
     # Load rankings matrix
-    rankings_file = OUTPUT_DIR / f'rankings_matrix_{holding_months}month.npz'
+    rankings_file = OUTPUT_DIR / f'rankings_matrix_{horizon_label}.npz'
     if not rankings_file.exists():
         raise FileNotFoundError(f"Rankings matrix not found: {rankings_file}\nRun 4_compute_forward_alpha.py first.")
 
@@ -450,9 +456,10 @@ def precompute_feature_alpha(alpha_df, rankings, dates, isins, feature_names):
     return feature_alpha, feature_hit
 
 
-def save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, holding_months):
+def save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, horizon):
     """Save the precomputed matrices."""
-    output_file = OUTPUT_DIR / f'feature_alpha_{holding_months}month.npz'
+    horizon_label = get_horizon_label(horizon)
+    output_file = OUTPUT_DIR / f'feature_alpha_{horizon_label}.npz'
 
     np.savez_compressed(
         output_file,
@@ -473,36 +480,42 @@ def save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, holding
 
 def parse_horizons(arg_string):
     """
-    Parse horizon argument string into list of integers.
+    Parse horizon argument string into list of horizons.
 
     Supports:
-        - Single value: "3" -> [3]
-        - Comma-separated: "1,2,3,4,5,6" -> [1,2,3,4,5,6]
-        - Range: "1-6" -> [1,2,3,4,5,6]
-        - Combined: "1,3-5,7" -> [1,3,4,5,7]
+        - Single month value: "3" -> [3]
+        - Comma-separated months: "1,2,3" -> [1,2,3]
+        - Range of months: "1-6" -> [1,2,3,4,5,6]
+        - Daily horizons: "5d,10d,15d" -> ['5d','10d','15d']
+        - Combined: "1,5d,10d" -> [1,'5d','10d']
     """
     horizons = []
     parts = arg_string.split(',')
 
     for part in parts:
         part = part.strip()
-        if '-' in part:
-            # Range notation
+        if part.endswith('d'):
+            # Daily horizon
+            horizons.append(part)
+        elif '-' in part and not part.startswith('-'):
+            # Range notation (only for months)
             start, end = part.split('-')
             horizons.extend(range(int(start), int(end) + 1))
         else:
             horizons.append(int(part))
 
-    return sorted(set(horizons))  # Remove duplicates and sort
+    return horizons  # Keep order as specified
 
 
-def main(holding_months=DEFAULT_HOLDING_MONTHS):
+def main(horizon=HOLDING_MONTHS):
     """Run the precomputation for a single horizon."""
+    horizon_label = get_horizon_label(horizon)
+
     print("=" * 60)
-    print(f"PRECOMPUTE FEATURE-ALPHA MATRIX - {holding_months} MONTH HORIZON")
+    print(f"PRECOMPUTE FEATURE-ALPHA MATRIX - {horizon_label.upper()} HORIZON")
     print("=" * 60)
 
-    output_file = OUTPUT_DIR / f'feature_alpha_{holding_months}month.npz'
+    output_file = OUTPUT_DIR / f'feature_alpha_{horizon_label}.npz'
 
     if output_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[EXISTS] {output_file}")
@@ -516,7 +529,7 @@ def main(holding_months=DEFAULT_HOLDING_MONTHS):
         return
 
     # Load data
-    alpha_df, rankings, dates, isins, feature_names = load_data(holding_months)
+    alpha_df, rankings, dates, isins, feature_names = load_data(horizon)
 
     # Precompute
     feature_alpha, feature_hit = precompute_feature_alpha(
@@ -524,12 +537,12 @@ def main(holding_months=DEFAULT_HOLDING_MONTHS):
     )
 
     # Save
-    save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, holding_months)
+    save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, horizon)
 
     print("\n" + "=" * 60)
     print("PRECOMPUTATION COMPLETE")
     print("=" * 60)
-    print(f"\nNext step: Run 6_fast_backtest.py for walk-forward backtesting")
+    print(f"\nNext step: Run backtest scripts for walk-forward backtesting")
 
 
 def main_multi_horizon(horizons):
@@ -545,12 +558,14 @@ def main_multi_horizon(horizons):
     total_start = time.time()
     results = {}
 
-    for i, holding_months in enumerate(horizons, 1):
+    for i, horizon in enumerate(horizons, 1):
+        horizon_label = get_horizon_label(horizon)
+
         print(f"\n{'#' * 60}")
-        print(f"# HORIZON {i}/{len(horizons)}: {holding_months} MONTH(S)")
+        print(f"# HORIZON {i}/{len(horizons)}: {horizon_label.upper()}")
         print(f"{'#' * 60}")
 
-        output_file = OUTPUT_DIR / f'feature_alpha_{holding_months}month.npz'
+        output_file = OUTPUT_DIR / f'feature_alpha_{horizon_label}.npz'
 
         if output_file.exists() and not FORCE_RECOMPUTE:
             print(f"\n[EXISTS] {output_file}")
@@ -566,7 +581,7 @@ def main_multi_horizon(horizons):
         horizon_start = time.time()
 
         # Load data
-        alpha_df, rankings, dates, isins, feature_names = load_data(holding_months)
+        alpha_df, rankings, dates, isins, feature_names = load_data(horizon)
 
         # Precompute
         feature_alpha, feature_hit = precompute_feature_alpha(
@@ -574,12 +589,12 @@ def main_multi_horizon(horizons):
         )
 
         # Save
-        save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, holding_months)
+        save_feature_alpha(feature_alpha, feature_hit, dates, feature_names, horizon)
 
         horizon_time = time.time() - horizon_start
-        print(f"\n[DONE] {holding_months}-month horizon completed in {horizon_time:.1f}s")
+        print(f"\n[DONE] {horizon_label} horizon completed in {horizon_time:.1f}s")
 
-        results[holding_months] = {
+        results[horizon] = {
             'feature_alpha': feature_alpha,
             'feature_hit': feature_hit
         }
@@ -592,21 +607,18 @@ def main_multi_horizon(horizons):
     print(f"\nTotal time: {total_time:.1f}s ({total_time/60:.1f} min)")
     print(f"\nOutputs saved to: {OUTPUT_DIR}/")
     for h in horizons:
-        print(f"  feature_alpha_{h}month.npz")
-    print("\nNext step: Run 7_multi_horizon_backtest.py for consensus backtesting")
-    print(f"           Or run 6_fast_backtest.py for single-horizon backtesting")
+        label = get_horizon_label(h)
+        print(f"  feature_alpha_{label}.npz")
+    print("\nNext step: Run backtest scripts for walk-forward backtesting")
 
     return results
 
 
 if __name__ == '__main__':
-    # Priority: command line arg > HORIZONS config > DEFAULT_HOLDING_MONTHS
+    # Single horizon only (multi-horizon showed no benefit)
     if len(sys.argv) > 1:
-        horizons = parse_horizons(sys.argv[1])
+        horizon = int(sys.argv[1])
     else:
-        horizons = HORIZONS if HORIZONS else [DEFAULT_HOLDING_MONTHS]
+        horizon = HOLDING_MONTHS
 
-    if len(horizons) == 1:
-        main(horizons[0])
-    else:
-        main_multi_horizon(horizons)
+    main(horizon)

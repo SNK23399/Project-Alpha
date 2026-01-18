@@ -1,4 +1,85 @@
 \section{Conclusion}
 \label{sec:conclusion}
 
-Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+This document has presented a systematic approach to core-satellite portfolio management using signal-based ETF selection. Through comprehensive feature engineering, walk-forward backtesting, and rigorous statistical testing, we have identified an effective and robust strategy for generating consistent alpha.
+
+\subsection{Key Findings}
+
+\textbf{1. IC-weighted feature ensembles generate statistically significant alpha.}
+
+The Information Coefficient (IC) weighting mechanism is the only tested improvement that achieves statistical significance at the 5\% level (p = 0.047). By weighting features according to their rolling correlation with forward alpha, the ensemble adapts to changing market conditions while maintaining robustness.
+
+\textbf{2. Simplicity outperforms complexity.}
+
+Despite testing numerous enhancements---including dynamic satellite count, stability weighting, time-series features, and regime-adaptive signals---none achieved statistical significance beyond the basic IC-weighted approach. This supports the principle that simpler strategies are often more robust out-of-sample.
+
+\textbf{3. N=5 satellites provides optimal balance.}
+
+Analysis across $N \in \{1, \ldots, 10\}$ reveals that N=5 maximizes the hit rate (92.8\%) while maintaining meaningful alpha (+4.88\% annualized). Lower N increases alpha but reduces consistency; higher N provides stability at the cost of alpha dilution.
+
+\textbf{4. Results are temporally robust.}
+
+The strategy outperforms the baseline in all 10 years tested, with consistent alpha across early, middle, and late sub-periods. Rolling alpha is positive 87.4\% of the time. This rules out early-luck compounding as the source of returns.
+
+\subsection{Final Strategy Specification}
+
+Based on our analysis, the recommended strategy is:
+
+\begin{table}[h]
+\centering
+\caption{Final Strategy Parameters}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Core allocation & 60\% (iShares MSCI ACWI) \\
+Satellite allocation & 40\% (5 ETFs at 8\% each) \\
+Selection method & IC-weighted feature ensemble \\
+Number of satellites & Fixed N=5 \\
+Rebalancing frequency & Monthly \\
+Holding period & 1 month \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Expected performance:}
+\begin{itemize}
+    \item Annualized alpha: approximately +4.9\% over ACWI
+    \item Monthly hit rate: approximately 93\%
+    \item Maximum drawdown: approximately $-7\%$ relative to benchmark
+    \item Sharpe ratio: approximately 1.07
+\end{itemize}
+
+\subsection{Practical Implications}
+
+For long-term investors with a 30+ year horizon, this strategy offers several advantages:
+
+\textbf{Systematic execution:} Clear rules eliminate emotional decision-making and ensure consistent implementation.
+
+\textbf{Tax efficiency:} Irish-domiciled accumulating ETFs minimize dividend taxes. Infrequent trading (monthly) reduces capital gains events.
+
+\textbf{Low costs:} With EUR 1--3 per trade and low-expense ETFs (TER $<$ 0.30\%), transaction costs do not significantly erode alpha.
+
+\textbf{Scalability:} The strategy works for portfolios from EUR 10,000 to EUR 1,000,000+ without modification.
+
+\textbf{Profit locking:} Monthly rebalancing automatically transfers satellite gains into the stable core, reducing portfolio risk over time.
+
+\subsection{Limitations and Future Work}
+
+While the strategy demonstrates robust historical performance, several areas warrant further investigation:
+
+\textbf{Extended out-of-sample testing:} Prospective implementation would provide the strongest evidence of strategy validity.
+
+\textbf{Alternative asset classes:} The signal framework could be extended to bonds, commodities, or factor ETFs to further diversify alpha sources.
+
+\textbf{Machine learning integration:} Non-linear models might capture additional predictive relationships, though care must be taken to avoid overfitting.
+
+\textbf{Transaction cost optimization:} More sophisticated rebalancing rules could reduce turnover while maintaining signal freshness.
+
+\subsection{Closing Remarks}
+
+The core-satellite framework, combined with systematic signal-based selection, offers a compelling approach to long-term wealth accumulation. By prioritizing statistical rigor over backtest optimization, we have identified a strategy that balances alpha generation with robustness and simplicity.
+
+The key insight from this work is that \textbf{statistical significance matters more than backtest performance}. Many apparent improvements fail to achieve significance when properly tested. By accepting only IC weighting---the sole statistically significant enhancement---we reduce the risk of implementing strategies that will not persist out-of-sample.
+
+For investors seeking consistent outperformance over a multi-decade horizon, the IC-weighted core-satellite strategy provides a principled, evidence-based approach to portfolio construction.

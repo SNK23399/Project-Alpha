@@ -57,12 +57,11 @@ from support.signal_database import SignalDatabase
 # Core ETF (benchmark)
 CORE_ISIN = 'IE00B4L5Y983'  # iShares Core MSCI World
 
-# Horizons to compute (list of months)
-# Set to single value [1] for original behavior, or multiple [1,2,3,4,5,6] for multi-horizon
-HORIZONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-# Default holding period (used if HORIZONS is empty or for backward compatibility)
-DEFAULT_HOLDING_MONTHS = 1
+# Horizon configuration
+# Testing showed: multi-month horizons (2-12) and daily confirmations (5d, 10d, 15d)
+# provided NO statistically significant improvement over single 1-month horizon.
+# Keeping only 1-month for simplicity and computation speed.
+HOLDING_MONTHS = 1
 
 # Minimum price history required (1 year)
 MIN_HISTORY_DAYS = 252
@@ -140,19 +139,51 @@ def load_single_etf(args):
         return isin, None
 
 
-def compute_forward_alpha(holding_months):
+def parse_horizon(horizon):
+    """
+    Parse horizon specification into (value, unit) tuple.
+
+    Examples:
+        1 -> (1, 'month')
+        '5d' -> (5, 'days')
+        '10d' -> (10, 'days')
+    """
+    if isinstance(horizon, int):
+        return (horizon, 'month')
+    elif isinstance(horizon, str) and horizon.endswith('d'):
+        return (int(horizon[:-1]), 'days')
+    else:
+        raise ValueError(f"Invalid horizon format: {horizon}. Use int for months or '5d' for days.")
+
+
+def get_horizon_label(horizon):
+    """Get a label string for a horizon (for filenames and display)."""
+    value, unit = parse_horizon(horizon)
+    if unit == 'month':
+        return f"{value}month"
+    else:
+        return f"{value}days"
+
+
+def compute_forward_alpha(horizon):
     """
     Compute forward alpha for all ETFs at monthly intervals.
+
+    Args:
+        horizon: Either an integer (months) or string like '5d' (trading days)
 
     OPTIMIZED: Uses vectorized operations instead of nested Python loops.
     ~10-50x faster than the original implementation.
     """
+    horizon_value, horizon_unit = parse_horizon(horizon)
+    horizon_label = get_horizon_label(horizon)
+
     print(f"\n{'='*60}")
-    print(f"STEP 1: COMPUTE FORWARD ALPHA ({holding_months}-MONTH HORIZON)")
+    print(f"STEP 1: COMPUTE FORWARD ALPHA ({horizon_label.upper()} HORIZON)")
     print(f"{'='*60}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    alpha_file = OUTPUT_DIR / f'forward_alpha_{holding_months}month.parquet'
+    alpha_file = OUTPUT_DIR / f'forward_alpha_{horizon_label}.parquet'
 
     if alpha_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[LOADING] Pre-computed forward alpha from {alpha_file}")
@@ -215,10 +246,27 @@ def compute_forward_alpha(holding_months):
     # Find actual trading dates for each monthly date using searchsorted
     # searchsorted finds where each monthly_date would be inserted to maintain order
     # We want the first trading date >= monthly_date
-    print(f"\nMapping monthly dates to trading dates...")
+    print(f"\nMapping dates to trading dates...")
 
-    start_indices = np.searchsorted(trading_dates, monthly_dates_arr[:-holding_months])
-    end_indices = np.searchsorted(trading_dates, monthly_dates_arr[holding_months:])
+    # Get start indices (monthly dates mapped to trading dates)
+    start_indices = np.searchsorted(trading_dates, monthly_dates_arr)
+
+    if horizon_unit == 'month':
+        # Monthly horizon: offset by N months in the monthly_dates array
+        # Use all monthly dates except the last N
+        valid_start_mask = np.arange(len(monthly_dates)) < len(monthly_dates) - horizon_value
+        start_indices = start_indices[valid_start_mask]
+
+        # End indices come from monthly dates offset by horizon_value months
+        end_monthly_indices = np.arange(horizon_value, len(monthly_dates))
+        end_indices = np.searchsorted(trading_dates, monthly_dates_arr[end_monthly_indices])
+    else:
+        # Daily horizon: offset by N trading days from each start date
+        # Use all monthly dates where start + N days is still within bounds
+        end_indices = start_indices + horizon_value
+        valid_mask = end_indices < len(trading_dates)
+        start_indices = start_indices[valid_mask]
+        end_indices = end_indices[valid_mask]
 
     # Filter valid indices (within bounds)
     valid_mask = (start_indices < len(trading_dates)) & (end_indices < len(trading_dates))
@@ -305,7 +353,7 @@ def compute_forward_alpha(holding_months):
     # Save
     alpha_df.to_parquet(alpha_file, index=False)
 
-    print(f"\n{holding_months}-month forward alpha:")
+    print(f"\n{horizon_label} forward alpha:")
     print(f"  Observations: {len(alpha_df):,}")
     print(f"  Dates: {alpha_df['date'].nunique()}")
     print(f"  ISINs: {alpha_df['isin'].nunique()}")
@@ -427,17 +475,19 @@ def load_feature_metrics(holding_months):
     return None
 
 
-def create_rankings_matrix(alpha_df, holding_months):
+def create_rankings_matrix(alpha_df, horizon):
     """
     Create a 3D matrix of rankings for all features.
 
     OPTIMIZED: Uses vectorized matrix filling instead of Python loops.
     """
+    horizon_label = get_horizon_label(horizon)
+
     print(f"\n{'='*60}")
     print(f"STEP 2: CREATE RANKINGS MATRIX")
     print(f"{'='*60}")
 
-    matrix_file = OUTPUT_DIR / f'rankings_matrix_{holding_months}month.npz'
+    matrix_file = OUTPUT_DIR / f'rankings_matrix_{horizon_label}.npz'
 
     if matrix_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[LOADING] Pre-computed rankings matrix from {matrix_file}")
@@ -454,8 +504,8 @@ def create_rankings_matrix(alpha_df, holding_months):
 
     print(f"\n[COMPUTING] Rankings matrix (optimized)...")
 
-    # Load feature metrics
-    feature_metrics = load_feature_metrics(holding_months)
+    # Load feature metrics (use 1-month metrics as base for feature selection)
+    feature_metrics = load_feature_metrics(1)  # Always use 1-month for feature selection
 
     if feature_metrics is None:
         # Fall back to loading all signals
@@ -599,49 +649,55 @@ def create_rankings_matrix(alpha_df, holding_months):
 
 def parse_horizons(arg_string):
     """
-    Parse horizon argument string into list of integers.
+    Parse horizon argument string into list of horizons.
 
     Supports:
-        - Single value: "3" -> [3]
-        - Comma-separated: "1,2,3,4,5,6" -> [1,2,3,4,5,6]
-        - Range: "1-6" -> [1,2,3,4,5,6]
-        - Combined: "1,3-5,7" -> [1,3,4,5,7]
+        - Single month value: "3" -> [3]
+        - Comma-separated months: "1,2,3" -> [1,2,3]
+        - Range of months: "1-6" -> [1,2,3,4,5,6]
+        - Daily horizons: "5d,10d,15d" -> ['5d','10d','15d']
+        - Combined: "1,5d,10d" -> [1,'5d','10d']
     """
     horizons = []
     parts = arg_string.split(',')
 
     for part in parts:
         part = part.strip()
-        if '-' in part:
-            # Range notation
+        if part.endswith('d'):
+            # Daily horizon
+            horizons.append(part)
+        elif '-' in part and not part.startswith('-'):
+            # Range notation (only for months)
             start, end = part.split('-')
             horizons.extend(range(int(start), int(end) + 1))
         else:
             horizons.append(int(part))
 
-    return sorted(set(horizons))  # Remove duplicates and sort
+    return horizons  # Keep order as specified
 
 
-def main(holding_months=DEFAULT_HOLDING_MONTHS):
+def main(horizon=HOLDING_MONTHS):
     """Run the forward alpha and rankings matrix computation for a single horizon."""
+    horizon_label = get_horizon_label(horizon)
+
     print("=" * 60)
-    print(f"WALK-FORWARD DATA PREPARATION - {holding_months} MONTH HORIZON")
+    print(f"WALK-FORWARD DATA PREPARATION - {horizon_label.upper()} HORIZON")
     print("=" * 60)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Compute forward alpha
-    alpha_df = compute_forward_alpha(holding_months)
+    alpha_df = compute_forward_alpha(horizon)
 
     # Step 2: Create rankings matrix
-    rankings_data = create_rankings_matrix(alpha_df, holding_months)
+    rankings_data = create_rankings_matrix(alpha_df, horizon)
 
     print("\n" + "=" * 60)
     print("DATA PREPARATION COMPLETE")
     print("=" * 60)
     print(f"\nOutputs saved to: {OUTPUT_DIR}/")
-    print(f"  forward_alpha_{holding_months}month.parquet")
-    print(f"  rankings_matrix_{holding_months}month.npz")
+    print(f"  forward_alpha_{horizon_label}.parquet")
+    print(f"  rankings_matrix_{horizon_label}.npz")
 
     return alpha_df, rankings_data
 
@@ -661,23 +717,25 @@ def main_multi_horizon(horizons):
     total_start = time.time()
     results = {}
 
-    for i, holding_months in enumerate(horizons, 1):
+    for i, horizon in enumerate(horizons, 1):
+        horizon_label = get_horizon_label(horizon)
+
         print(f"\n{'#' * 60}")
-        print(f"# HORIZON {i}/{len(horizons)}: {holding_months} MONTH(S)")
+        print(f"# HORIZON {i}/{len(horizons)}: {horizon_label.upper()}")
         print(f"{'#' * 60}")
 
         horizon_start = time.time()
 
         # Step 1: Compute forward alpha
-        alpha_df = compute_forward_alpha(holding_months)
+        alpha_df = compute_forward_alpha(horizon)
 
         # Step 2: Create rankings matrix
-        rankings_data = create_rankings_matrix(alpha_df, holding_months)
+        rankings_data = create_rankings_matrix(alpha_df, horizon)
 
         horizon_time = time.time() - horizon_start
-        print(f"\n[DONE] {holding_months}-month horizon completed in {horizon_time:.1f}s")
+        print(f"\n[DONE] {horizon_label} horizon completed in {horizon_time:.1f}s")
 
-        results[holding_months] = {
+        results[horizon] = {
             'alpha_df': alpha_df,
             'rankings_data': rankings_data
         }
@@ -690,21 +748,20 @@ def main_multi_horizon(horizons):
     print(f"\nTotal time: {total_time:.1f}s ({total_time/60:.1f} min)")
     print(f"\nOutputs saved to: {OUTPUT_DIR}/")
     for h in horizons:
-        print(f"  forward_alpha_{h}month.parquet, rankings_matrix_{h}month.npz")
+        label = get_horizon_label(h)
+        print(f"  forward_alpha_{label}.parquet, rankings_matrix_{label}.npz")
     print("\nNext step: Run 5_precompute_feature_alpha.py with same horizons")
-    print(f"           python 5_precompute_feature_alpha.py {','.join(map(str, horizons))}")
+    horizon_str = ','.join(str(h) for h in horizons)
+    print(f"           python 5_precompute_feature_alpha.py {horizon_str}")
 
     return results
 
 
 if __name__ == '__main__':
-    # Priority: command line arg > HORIZONS config > DEFAULT_HOLDING_MONTHS
+    # Single horizon only (multi-horizon showed no benefit)
     if len(sys.argv) > 1:
-        horizons = parse_horizons(sys.argv[1])
+        horizon = int(sys.argv[1])
     else:
-        horizons = HORIZONS if HORIZONS else [DEFAULT_HOLDING_MONTHS]
+        horizon = HOLDING_MONTHS
 
-    if len(horizons) == 1:
-        main(horizons[0])
-    else:
-        main_multi_horizon(horizons)
+    main(horizon)
