@@ -268,6 +268,26 @@ def compute_ensemble_alpha_all_dates(rankings, feature_indices, alpha_matrix, al
     return alphas
 
 
+def compute_weighted_avg_from_alphas(alphas, weights):
+    """
+    Fast weighted average computation from pre-computed alphas array.
+    This is called after compute_ensemble_alpha_all_dates (which is parallelized).
+    """
+    valid_mask = ~np.isnan(alphas)
+    if not np.any(valid_mask):
+        return np.nan, 0
+
+    valid_alphas = alphas[valid_mask]
+    valid_weights = weights[valid_mask]
+
+    sum_weight = np.sum(valid_weights)
+    if sum_weight == 0:
+        return np.nan, 0
+
+    weighted_avg = np.sum(valid_alphas * valid_weights) / sum_weight
+    return weighted_avg, len(valid_alphas)
+
+
 @njit(cache=True)
 def select_top_n_isins(rankings_slice, feature_indices, n_satellites, alpha_valid_mask=None):
     """
@@ -490,7 +510,7 @@ def fast_greedy_search_with_decay(data, n_satellites, train_mask, test_idx):
         for feat_idx, pred_type, _ in remaining:
             test_indices = np.append(current_indices, feat_idx).astype(np.int64)
 
-            # Compute ensemble alpha using Numba
+            # Compute ensemble alpha using Numba (parallelized)
             alphas = compute_ensemble_alpha_all_dates(
                 rankings, test_indices, alpha_matrix, alpha_valid, train_mask_np, n_satellites
             )
