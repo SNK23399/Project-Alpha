@@ -201,10 +201,11 @@ def compute_forward_alpha(horizon):
     print(f"\n[COMPUTING] Forward alpha (optimized)...")
 
     # Load ETF prices in parallel FIRST (to determine date range)
-    db = ETFDatabase()
+    # Database is in maintenance/data folder
+    db_path = str(project_root / "maintenance" / "data" / "etf_database.db")
+    db = ETFDatabase(db_path)
     universe_df = db.load_universe()
     etf_list = universe_df['isin'].tolist()
-    db_path = db.db_path if hasattr(db, 'db_path') else 'data/etf_database.db'
 
     print(f"\nLoading price data for {len(etf_list)} ETFs with {N_THREADS} threads...")
 

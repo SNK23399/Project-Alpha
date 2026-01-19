@@ -11,14 +11,19 @@ computing signal bases. It checks for:
 
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent / "support"))
+
+MAINTENANCE_DIR = Path(__file__).parent
+sys.path.insert(0, str(MAINTENANCE_DIR.parent / "support"))
 
 import pandas as pd
 import numpy as np
 from etf_database import ETFDatabase
 
 
-def analyze_data_quality(db_path="data/etf_database.db"):
+def analyze_data_quality(db_path=None):
+    # Default path is in maintenance/data folder
+    if db_path is None:
+        db_path = MAINTENANCE_DIR / "data" / "etf_database.db"
     """Analyze ETF price data quality."""
     print("=" * 80)
     print(" " * 25 + "ETF DATA QUALITY ANALYSIS")

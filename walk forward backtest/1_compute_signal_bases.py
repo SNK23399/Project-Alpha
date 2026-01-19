@@ -56,8 +56,9 @@ def compute_and_save_signal_bases(
     print("=" * 80)
     print(f"  Output:  {SIGNAL_OUTPUT_DIR}/")
 
-    # Initialize databases
-    etf_db = ETFDatabase("data/etf_database.db")
+    # Initialize databases (database is in maintenance/data folder)
+    db_path = project_root / "maintenance" / "data" / "etf_database.db"
+    etf_db = ETFDatabase(str(db_path))
     signal_db = SignalDatabase(SIGNAL_OUTPUT_DIR)
 
     # Check for existing signals if resuming

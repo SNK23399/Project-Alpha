@@ -1,8 +1,8 @@
 """
 Compare Old vs New ETF Databases
 
-This script compares the old database (data/etf_database.db) with the new one
-(data/etf_database_new.db) to verify that:
+This script compares the old database (maintenance/data/etf_database.db) with the new one
+(maintenance/data/etf_database_new.db) to verify that:
 1. Same ETFs are present
 2. Price data matches in overlapping periods (after core inception: 2009-09-25)
 3. Old database has pre-2009 data that was correctly filtered out in new database
@@ -13,6 +13,7 @@ from pathlib import Path
 
 # Get project root directory (parent of maintenance folder)
 PROJECT_ROOT = Path(__file__).parent.parent
+MAINTENANCE_DIR = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "support"))
 
 import pandas as pd
@@ -22,9 +23,9 @@ from etf_database import ETFDatabase
 
 CORE_INCEPTION_DATE = pd.Timestamp('2009-09-25')
 
-# Default paths relative to project root
-DEFAULT_OLD_DB = PROJECT_ROOT / "data" / "etf_database.db"
-DEFAULT_NEW_DB = PROJECT_ROOT / "data" / "etf_database_new.db"
+# Default paths in maintenance/data folder
+DEFAULT_OLD_DB = MAINTENANCE_DIR / "data" / "etf_database.db"
+DEFAULT_NEW_DB = MAINTENANCE_DIR / "data" / "etf_database_new.db"
 
 
 def compare_databases(old_db_path=None, new_db_path=None):

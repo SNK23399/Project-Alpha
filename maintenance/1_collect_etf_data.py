@@ -9,13 +9,13 @@ This script builds and maintains the ETF database:
 5. Saves everything to SQLite database
 
 Output:
-- data/etf_database.db - SQLite database containing:
+- maintenance/data/etf_database.db - SQLite database containing:
   - etfs table: ETF metadata (name, TER, fund size, etc.)
   - prices table: Historical price data (from 2009-09-25 onwards)
 
 Usage:
-  python 0_collect_etf_data.py              # Full collection
-  python 0_collect_etf_data.py --update     # Update existing database (monthly workflow)
+  python 1_collect_etf_data.py              # Full collection
+  python 1_collect_etf_data.py --update     # Update existing database (monthly workflow)
 """
 
 import sys
@@ -59,7 +59,12 @@ def connect_degiro():
     return client, api
 
 
-def initialize_database(db_path="data/etf_database_new.db", update_mode=False):
+def initialize_database(db_path=None, update_mode=False):
+    # Default path is in maintenance/data folder
+    if db_path is None:
+        script_dir = Path(__file__).parent
+        db_path = script_dir / "data" / "etf_database_new.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     """Initialize or connect to database."""
     print("=" * 80)
     print("INITIALIZING DATABASE")
@@ -235,8 +240,8 @@ def fetch_and_store_prices(db, df_universe):
         except Exception as e:
             fail_count += 1
 
-        # Rate limiting for JustETF (0.5s to avoid rate limiting)
-        time.sleep(0.5)
+        # Rate limiting for JustETF (0.2s seems to work without getting blocked)
+        time.sleep(0.2)
 
     print(f"\n✓ Successfully fetched prices for {success_count}/{len(isins)} ETFs")
     if fail_count > 0:

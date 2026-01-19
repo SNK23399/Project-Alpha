@@ -101,7 +101,9 @@ def load_market_data() -> pd.DataFrame:
     """Load core ETF (ACWI) prices for market context."""
     from support.etf_database import ETFDatabase
 
-    etf_db = ETFDatabase("data/etf_database.db")
+    # Database is in maintenance/data folder
+    db_path = project_root / "maintenance" / "data" / "etf_database.db"
+    etf_db = ETFDatabase(str(db_path))
     core_isin = 'IE00B4L5Y983'  # MSCI ACWI
 
     prices = etf_db.load_prices(core_isin)

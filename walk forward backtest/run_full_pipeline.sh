@@ -51,11 +51,11 @@ echo "STEP 5/6: Precomputing feature-alpha matrix..."
 echo "--------------------------------------------------------------------------------"
 python "$SCRIPT_DIR/5_precompute_feature_alpha.py"
 
-# Step 6
+# Step 5
 echo ""
-echo "STEP 6/6: Running backtest..."
+echo "STEP 6/6: Precomputing MC hitrates..."
 echo "--------------------------------------------------------------------------------"
-python "$SCRIPT_DIR/6_backtest_strategy.py"
+python "$SCRIPT_DIR/5b_precompute_mc_hitrates.py"
 
 echo ""
 echo "================================================================================"
