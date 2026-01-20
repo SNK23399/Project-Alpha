@@ -72,7 +72,7 @@ sys.path.insert(0, str(project_root))
 HOLDING_MONTHS = 1
 
 # N values to test (N=5 is recommended - see docstring)
-N_SATELLITES_TO_TEST = [5]  # Use [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] to test all
+N_SATELLITES_TO_TEST = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]  # Use [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] to test all
 
 # Training parameters
 MIN_TRAINING_MONTHS = 36
@@ -141,6 +141,11 @@ DEFAULT_MC_CONFIDENCE_LEVEL = 0.90
 # Enhanced priors
 USE_HITRATE_IN_PRIOR = True
 USE_STABILITY_IN_PRIOR = True
+
+# MC prior data quality threshold (FIX #3: require at least 6 months of MC history)
+# Before: len(valid_dates) > 0 allowed single noisy data point as prior
+# After: len(valid_dates) >= 6 requires 6+ months for more robust prior initialization
+MIN_MC_VALID_DATES = 6
 
 # Data and output directories
 DATA_DIR = Path(__file__).parent / 'data'
@@ -896,7 +901,8 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
                 if not np.isnan(mu):
                     valid_dates.append(d)
 
-        if len(valid_dates) > 0:
+        # FIX #3: Require at least 6 months of MC data for robust prior
+        if len(valid_dates) >= MIN_MC_VALID_DATES:
             mus = [mc_alpha_mean[d, feat_idx] for d in valid_dates]
             stds = [mc_alpha_std[d, feat_idx] for d in valid_dates]
             avg_alpha_mu = np.nanmean(mus)
