@@ -49,8 +49,8 @@ sys.path.insert(0, str(project_root))
 HOLDING_MONTHS = 1
 N_SATELLITES_TO_PRECOMPUTE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 MIN_TRAINING_MONTHS = 36
-MIN_ALPHA = 0.001
-MIN_HIT_RATE = 0.55
+MIN_ALPHA = 0.00
+MIN_HIT_RATE = 0.5
 DECAY_HALF_LIFE_MONTHS = 54
 
 # Monte Carlo settings

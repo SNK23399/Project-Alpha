@@ -142,10 +142,11 @@ DEFAULT_MC_CONFIDENCE_LEVEL = 0.90
 USE_HITRATE_IN_PRIOR = True
 USE_STABILITY_IN_PRIOR = True
 
-# MC prior data quality threshold (FIX #3: require at least 6 months of MC history)
-# Before: len(valid_dates) > 0 allowed single noisy data point as prior
-# After: len(valid_dates) >= 6 requires 6+ months for more robust prior initialization
-MIN_MC_VALID_DATES = 6
+# MC prior data quality threshold
+# Revalidation showed MIN_MC_VALID_DATES=6 had no performance benefit over =1
+# Trade-off: 6 months more training vs 0% improvement = not worth it
+# Keeping original threshold for simplicity and more test data
+MIN_MC_VALID_DATES = 1
 
 # Data and output directories
 DATA_DIR = Path(__file__).parent / 'data'
@@ -901,7 +902,7 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
                 if not np.isnan(mu):
                     valid_dates.append(d)
 
-        # FIX #3: Require at least 6 months of MC data for robust prior
+        # Use any MC data available (FIX #3 threshold of 6 months showed no benefit)
         if len(valid_dates) >= MIN_MC_VALID_DATES:
             mus = [mc_alpha_mean[d, feat_idx] for d in valid_dates]
             stds = [mc_alpha_std[d, feat_idx] for d in valid_dates]
