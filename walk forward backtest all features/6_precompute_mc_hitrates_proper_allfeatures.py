@@ -1,18 +1,32 @@
 """
-Step 5b: Precompute Monte Carlo Hit Rates (Walk-Forward Pipeline)
-=================================================================
+Step 6 (ALL-FEATURES): Precompute Monte Carlo Hit Rates (Walk-Forward Pipeline)
+=================================================================================
 
 OPTIMIZED VERSION - Fast GPU precomputation with Numba-accelerated aggregation.
 
-This script precomputes Monte Carlo hit rates for ALL features at each
-(date, N) combination. This allows the walk-forward backtest (script 7)
+This script precomputes Monte Carlo hit rates and alpha statistics for ALL features
+at each (date, N) combination. This allows the walk-forward backtest (step 8)
 to run very fast by loading precomputed MC results.
 
+For each feature at each test date, runs 1.5M (or configurable) Monte Carlo
+simulations to estimate:
+- Hit rate (probability of positive alpha)
+- Alpha mean and standard deviation
+- Confidence intervals
+
+These statistics are used by the Bayesian strategy to estimate feature reliability.
+
+COMPARISON WITH FILTERED VERSION:
+- Filtered version (walk forward backtest/): 793 features, uses MC to validate
+- All-features version (this file): 7,618 features, same MC approach
+
+MC_SAMPLES_PER_MONTH = 1500000 (configurable for tighter/looser CIs)
+
 Output:
-    data/mc_hitrates_{holding_months}month.npz
+    walk forward backtest all features/data/mc_hitrates_all_{holding_months}month.npz
 
 Usage:
-    python 5b_precompute_mc_hitrates.py
+    python 6_precompute_mc_hitrates_proper_allfeatures.py
 """
 
 import sys

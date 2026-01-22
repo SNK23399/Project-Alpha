@@ -1,14 +1,19 @@
 #!/usr/bin/env python
 """
-Step 2: Apply Filters to Signal Bases (Walk-Forward Pipeline)
-==============================================================
+Step 2: Apply Filters to Signal Bases (Walk-Forward Pipeline - ALL FEATURES VERSION)
+====================================================================================
 
 This script applies smoothing filters to the computed signal bases.
 Each base signal is filtered with multiple filter types (EMA, Hull MA, etc.)
 to create a comprehensive set of filtered signals for downstream analysis.
 
-NOTE: This script is identical to the original - filter application
-has no look-ahead bias (just transforms signal data).
+NOTE: This script is SHARED with the filtered version - filter application
+has no look-ahead bias (just transforms signal data). Outputs go to:
+    walk forward backtest all features/data/signals/filtered_signals/
+
+This generates ALL 7,911 possible filter combinations (293 signals × 27 filters).
+The filtered version in 'walk forward backtest/' pre-selects the best 500 by
+momentum alpha in step 4, whereas this ALL FEATURES version uses all of them.
 
 Output:
     Filtered signals are saved to data/signals/filtered_signals/ as parquet files.

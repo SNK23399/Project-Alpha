@@ -1,6 +1,6 @@
 """
-Step 1: Compute Signal Bases (Walk-Forward Pipeline)
-=====================================================
+Step 1: Compute Signal Bases (Walk-Forward Pipeline - ALL FEATURES VERSION)
+=============================================================================
 
 This script:
 1. Loads ETF prices from the database
@@ -9,8 +9,12 @@ This script:
 
 Run this FIRST before filtering.
 
-NOTE: This script is identical to the original - signal base computation
-has no look-ahead bias (just transforms price data).
+NOTE: This script is SHARED with the filtered version - signal base computation
+has no look-ahead bias (just transforms price data). Outputs go to:
+    walk forward backtest all features/data/signals/
+
+This is part of the ALL FEATURES pipeline that does NOT pre-filter signals
+by momentum alpha (unlike the filtered pipeline in 'walk forward backtest/').
 """
 
 import sys

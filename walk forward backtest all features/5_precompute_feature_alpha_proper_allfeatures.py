@@ -1,11 +1,11 @@
 """
-Step 5 (PROPER ALL-FEATURES): Precompute Feature-Alpha Matrix (Walk-Forward Pipeline)
-=======================================================================================
+Step 5 (ALL-FEATURES): Precompute Feature-Alpha Matrix (Walk-Forward Pipeline)
+================================================================================
 
-MODIFIED VERSION FOR ALL-FEATURES:
+MODIFIED VERSION FOR ALL-FEATURES PIPELINE:
 - Uses rankings_matrix_all_{N}month.npz (from step 4 all-features)
+- Processes all 7,618 features without pre-filtering
 - Everything else identical to original step 5
-- Supports all 7000+ features without pre-filtering
 
 This script precomputes the alpha that each feature would achieve at each
 date for each N value. This allows the walk-forward backtest to run very
@@ -17,8 +17,12 @@ ETFs according to that feature at that date.
 
 This is the key optimization that allows testing many N values quickly.
 
+COMPARISON WITH FILTERED VERSION:
+- Filtered version (walk forward backtest/): 793 features
+- All-features version (this file): 7,618 features
+
 Output:
-    data/feature_alpha_all_{holding_months}month.npz
+    walk forward backtest all features/data/feature_alpha_all_{holding_months}month.npz
 
 Usage:
     python 5_precompute_feature_alpha_proper_allfeatures.py [horizons]
@@ -26,8 +30,8 @@ Usage:
 Examples:
     python 5_precompute_feature_alpha_proper_allfeatures.py              # Default: 1 month horizon
     python 5_precompute_feature_alpha_proper_allfeatures.py 3            # Single: 3 month horizon
-    python 5_precompute_feature_alpha.py 1,2,3,4,5,6  # Multiple horizons
-    python 5_precompute_feature_alpha.py 1-6          # Range: 1 to 6 months
+    python 5_precompute_feature_alpha_proper_allfeatures.py 1,2,3,4,5,6  # Multiple horizons
+    python 5_precompute_feature_alpha_proper_allfeatures.py 1-6          # Range: 1 to 6 months
 """
 
 import sys

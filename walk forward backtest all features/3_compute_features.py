@@ -1,14 +1,19 @@
 """
-Step 3: Compute Features from Filtered Signals (Walk-Forward Pipeline)
-=======================================================================
+Step 3: Compute Features from Filtered Signals (Walk-Forward Pipeline - ALL FEATURES VERSION)
+==============================================================================================
 
 This script:
 1. Loads filtered signals from the database
-2. Computes 25 indicators (cross-sectional features)
+2. Computes 25 cross-sectional indicators for EACH filtered signal
 3. Saves features for model training
 
-NOTE: This script is identical to the original - feature computation
-has no look-ahead bias (just transforms filtered signal data).
+NOTE: This script is SHARED with the filtered version - feature computation
+has no look-ahead bias (just transforms filtered signal data). Outputs go to:
+    walk forward backtest all features/data/features/
+
+With 7,911 filtered signals (step 2), this generates 7,911 × 25 = 197,775 features
+(though many will be duplicates due to signal overlap). These are all available
+for selection in step 4 (unlike the filtered version which pre-selects 500).
 """
 
 import sys

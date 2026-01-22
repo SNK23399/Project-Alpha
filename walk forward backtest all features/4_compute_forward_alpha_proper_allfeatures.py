@@ -2,30 +2,34 @@
 Step 4 (ALL FEATURES): Compute Forward Alpha and Rankings Matrix - NO TOP_N FILTERING
 ======================================================================================
 
-MODIFIED VERSION FOR ALL-FEATURES COMPARISON:
-- Skips TOP_N pre-filtering of features
-- Uses ALL available filtered signals and raw signals
+MODIFIED VERSION FOR ALL-FEATURES PIPELINE:
+- Skips TOP_N pre-filtering of features (unlike filtered version)
+- Uses ALL available filtered signals and raw signals (7,618 total)
 - Everything else identical to original step 4
 
 This script computes the data needed for walk-forward backtesting:
 1. Forward alpha for all ETFs at monthly intervals
-2. Rankings matrix (cross-sectional percentile ranks for ALL features)
+2. Rankings matrix (cross-sectional percentile ranks for ALL 7,618 features)
 
 IMPORTANT: This script does NOT do feature selection or ensemble search.
-That happens in the backtest script, using only past data at each test date.
+That happens in the backtest script (step 8), using only past data at each test date.
+
+COMPARISON WITH FILTERED VERSION (walk forward backtest/):
+- Filtered version: TOP_N_FILTERED_FEATURES=500, TOP_N_RAW_SIGNALS=500 (793 total)
+- All-features version: TOP_N_FILTERED_FEATURES=None, TOP_N_RAW_SIGNALS=None (7,618 total)
 
 Output:
-    data/forward_alpha_{N}month.parquet    - Forward alpha for each ETF
-    data/rankings_matrix_all_{N}month.npz  - Feature rankings matrix (ALL features)
+    walk forward backtest all features/data/forward_alpha_{N}month.parquet
+    walk forward backtest all features/data/rankings_matrix_all_{N}month.npz
 
 Usage:
-    python 4_compute_forward_alpha_allfeatures.py [horizons]
+    python 4_compute_forward_alpha_proper_allfeatures.py [horizons]
 
 Examples:
-    python 4_compute_forward_alpha_allfeatures.py              # Default: 1 month horizon
-    python 4_compute_forward_alpha_allfeatures.py 3            # Single: 3 month horizon
-    python 4_compute_forward_alpha_allfeatures.py 1,2,3,4,5,6  # Multiple horizons
-    python 4_compute_forward_alpha_allfeatures.py 1-6          # Range: 1 to 6 months
+    python 4_compute_forward_alpha_proper_allfeatures.py              # Default: 1 month horizon
+    python 4_compute_forward_alpha_proper_allfeatures.py 3            # Single: 3 month horizon
+    python 4_compute_forward_alpha_proper_allfeatures.py 1,2,3,4,5,6  # Multiple horizons
+    python 4_compute_forward_alpha_proper_allfeatures.py 1-6          # Range: 1 to 6 months
 """
 
 import sys

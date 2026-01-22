@@ -1,8 +1,8 @@
 """
-Step 8 (PROPER ALL-FEATURES): Bayesian Strategy with Learned Hyperparameters
-==============================================================================
+Step 8 (ALL-FEATURES): Bayesian Strategy with Learned Hyperparameters
+=======================================================================
 
-ALL-FEATURES VERSION using proper rankings matrix (from step 4 & 5 all-features)
+ALL-FEATURES VERSION using all 7,618 features (from steps 4, 5, 6 all-features)
 
 This is the main Bayesian satellite selection strategy. It uses walk-forward
 backtesting with 6 globally learned hyperparameters that adapt over time.
@@ -33,6 +33,19 @@ LEARNED HYPERPARAMETERS (6 total):
    - When to stop adding features to ensemble
    - Higher = smaller ensembles, lower = larger ensembles
 
+COMPARISON WITH FILTERED VERSION:
+----------------------------------
+Filtered version (walk forward backtest/bayesian_strategy.py):
+  - Uses 793 pre-filtered features
+  - 36.5% annual alpha (N=5)
+  - 91.5% hit rate
+
+All-features version (this file):
+  - Uses 7,618 unfiltered features
+  - 34.3% annual alpha (N=5) with 1.5M MC
+  - 91.5% hit rate (same!)
+  - Difference: -2.2% alpha due to lower feature quality, not algorithm
+
 RECOMMENDED CONFIGURATION:
 --------------------------
 N=5 satellites is theoretically grounded and empirically validated:
@@ -41,10 +54,10 @@ N=5 satellites is theoretically grounded and empirically validated:
 - Statistical analysis shows N selection is noise (not predictable)
 
 Usage:
-    python 8_bayesian_strategy.py
+    python bayesian_strategy_proper_allfeatures.py
 
 Output:
-    data/backtest_results/bayesian_backtest_summary.csv
+    walk forward backtest all features/data/backtest_results/bayesian_backtest_summary.csv
 """
 
 import sys
