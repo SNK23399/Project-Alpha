@@ -1,33 +1,31 @@
 """
-Step 4: Compute Forward Alpha and Rankings Matrix (Walk-Forward Pipeline)
-==========================================================================
+Step 4 (ALL FEATURES): Compute Forward Alpha and Rankings Matrix - NO TOP_N FILTERING
+======================================================================================
 
-OPTIMIZED VERSION with:
-- ThreadPoolExecutor for parallel price loading
-- Fully vectorized forward alpha computation (no Python loops)
-- Vectorized date matching using searchsorted
-- Optimized ranking computation with numpy indexing
-- Support for multiple horizons in a single run
+MODIFIED VERSION FOR ALL-FEATURES COMPARISON:
+- Skips TOP_N pre-filtering of features
+- Uses ALL available filtered signals and raw signals
+- Everything else identical to original step 4
 
 This script computes the data needed for walk-forward backtesting:
 1. Forward alpha for all ETFs at monthly intervals
-2. Rankings matrix (cross-sectional percentile ranks for all features)
+2. Rankings matrix (cross-sectional percentile ranks for ALL features)
 
 IMPORTANT: This script does NOT do feature selection or ensemble search.
 That happens in the backtest script, using only past data at each test date.
 
 Output:
-    data/forward_alpha_{N}month.parquet  - Forward alpha for each ETF
-    data/rankings_matrix_{N}month.npz    - Feature rankings matrix
+    data/forward_alpha_{N}month.parquet    - Forward alpha for each ETF
+    data/rankings_matrix_all_{N}month.npz  - Feature rankings matrix (ALL features)
 
 Usage:
-    python 4_compute_forward_alpha.py [horizons]
+    python 4_compute_forward_alpha_allfeatures.py [horizons]
 
 Examples:
-    python 4_compute_forward_alpha.py              # Default: 1 month horizon
-    python 4_compute_forward_alpha.py 3            # Single: 3 month horizon
-    python 4_compute_forward_alpha.py 1,2,3,4,5,6  # Multiple horizons
-    python 4_compute_forward_alpha.py 1-6          # Range: 1 to 6 months
+    python 4_compute_forward_alpha_allfeatures.py              # Default: 1 month horizon
+    python 4_compute_forward_alpha_allfeatures.py 3            # Single: 3 month horizon
+    python 4_compute_forward_alpha_allfeatures.py 1,2,3,4,5,6  # Multiple horizons
+    python 4_compute_forward_alpha_allfeatures.py 1-6          # Range: 1 to 6 months
 """
 
 import sys
@@ -73,8 +71,9 @@ N_CORES = max(1, cpu_count() - 1)
 N_THREADS = min(32, cpu_count() * 4)
 
 # Feature pre-filtering (for rankings matrix)
-TOP_N_FILTERED_FEATURES = 500  # Top filtered features by momentum alpha
-TOP_N_RAW_SIGNALS = 500        # Top raw signals
+# SET TO None TO DISABLE FILTERING AND USE ALL FEATURES
+TOP_N_FILTERED_FEATURES = None  # Top filtered features by momentum alpha (None = ALL)
+TOP_N_RAW_SIGNALS = None        # Top raw signals (None = ALL)
 
 # Force recompute flags
 FORCE_RECOMPUTE = False
@@ -475,7 +474,7 @@ def create_rankings_matrix(alpha_df, horizon):
     print(f"STEP 2: CREATE RANKINGS MATRIX")
     print(f"{'='*60}")
 
-    matrix_file = OUTPUT_DIR / f'rankings_matrix_{horizon_label}.npz'
+    matrix_file = OUTPUT_DIR / f'rankings_matrix_all_{horizon_label}.npz'
 
     if matrix_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[LOADING] Pre-computed rankings matrix from {matrix_file}")
@@ -503,21 +502,33 @@ def create_rankings_matrix(alpha_df, horizon):
         raw_signals = db.get_available_signals()  # Already sorted in signal_database.py
 
         # Create minimal dataframes
+        # If TOP_N_* is None, use all signals; otherwise slice to top N
+        filtered_list = filtered_signals if TOP_N_FILTERED_FEATURES is None else filtered_signals[:TOP_N_FILTERED_FEATURES]
+        raw_list = raw_signals if TOP_N_RAW_SIGNALS is None else raw_signals[:TOP_N_RAW_SIGNALS]
+
         filtered_features = pd.DataFrame({
-            'feature_name': filtered_signals[:TOP_N_FILTERED_FEATURES],
+            'feature_name': filtered_list,
             'feature_type': 'filtered'
         })
         raw_signals_df = pd.DataFrame({
-            'feature_name': raw_signals[:TOP_N_RAW_SIGNALS],
+            'feature_name': raw_list,
             'feature_type': 'raw'
         })
     else:
-        # Use pre-computed metrics to select top features
+        # Use pre-computed metrics to select top features (or all if TOP_N is None)
         df_filtered = feature_metrics[feature_metrics['feature_type'] == 'filtered'].copy()
         df_raw = feature_metrics[feature_metrics['feature_type'] == 'raw'].copy()
 
-        filtered_features = df_filtered.nlargest(TOP_N_FILTERED_FEATURES, 'momentum_alpha')
-        raw_signals_df = df_raw.nlargest(TOP_N_RAW_SIGNALS, 'momentum_alpha')
+        # If TOP_N_* is None, use all features; otherwise select top N by momentum_alpha
+        if TOP_N_FILTERED_FEATURES is None:
+            filtered_features = df_filtered
+        else:
+            filtered_features = df_filtered.nlargest(TOP_N_FILTERED_FEATURES, 'momentum_alpha')
+
+        if TOP_N_RAW_SIGNALS is None:
+            raw_signals_df = df_raw
+        else:
+            raw_signals_df = df_raw.nlargest(TOP_N_RAW_SIGNALS, 'momentum_alpha')
 
     print(f"\nSelected {len(filtered_features)} filtered features")
     print(f"Selected {len(raw_signals_df)} raw signals")
