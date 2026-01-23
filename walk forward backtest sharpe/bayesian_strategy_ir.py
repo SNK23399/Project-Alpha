@@ -11,8 +11,8 @@ INFORMATION RATIO OPTIMIZATION PROJECT - Step 8
 Bayesian feature selection learned from MC-simulated Information Ratio statistics.
 
 This is the main Bayesian satellite selection strategy. It uses walk-forward
-backtesting with 5 globally learned hyperparameters that adapt over time.
-LEARNED HYPERPARAMETERS (5 total):
+backtesting with 2 core learned hyperparameters that adapt over time.
+LEARNED HYPERPARAMETERS (2 total):
 ----------------------------------
 1. DECAY RATE - Beta prior, controls observation forgetting
    - Higher decay = remember more history
@@ -21,18 +21,6 @@ LEARNED HYPERPARAMETERS (5 total):
 2. PRIOR STRENGTH - Gamma prior, controls MC prior trust
    - Higher = trust MC simulations more
    - Lower = let observed data dominate faster
-
-3. MIN_PROBABILITY_POSITIVE - Beta prior
-   - Threshold for feature selection (P(IR > 0) must exceed this)
-   - Higher = more selective, fewer features
-
-4. MC_CONFIDENCE_LEVEL - Beta prior
-   - How strict the Monte Carlo pre-filter is
-   - Higher = stricter filtering, fewer candidates
-
-5. GREEDY_IMPROVEMENT_THRESHOLD - Gamma prior
-   - When to stop adding features to ensemble
-   - Higher = smaller ensembles, lower = larger ensembles
 
 INFORMATION RATIO OPTIMIZATION:
 -------------------------------
@@ -108,33 +96,6 @@ PRIOR_STRENGTH_SCALE = 1.0
 PRIOR_STRENGTH_MIN = 10.0
 PRIOR_STRENGTH_MAX = 200.0
 
-# 3. ALPHA-HITRATE WEIGHT - Not used (pure IR optimization)
-
-# ============================================================
-# SELECTION HYPERPARAMETER PRIORS
-# ============================================================
-
-# 4. MIN_PROBABILITY_POSITIVE (Beta distribution, maps to [0.50, 0.70])
-#    Data-informed prior centered on converged value: 0.52
-PROB_THRESH_PRIOR_ALPHA = 1.0
-PROB_THRESH_PRIOR_BETA = 9.0
-PROB_THRESH_MIN = 0.50          # Minimum threshold
-PROB_THRESH_MAX = 0.70          # Maximum threshold
-
-# 5. MC_CONFIDENCE_LEVEL (Beta distribution, maps to [0.80, 0.99])
-#    Data-informed prior centered on converged value: 0.905
-MC_CONF_PRIOR_ALPHA = 21.0
-MC_CONF_PRIOR_BETA = 17.0
-MC_CONF_MIN = 0.80              # Minimum confidence
-MC_CONF_MAX = 0.99              # Maximum confidence
-
-# 6. GREEDY_IMPROVEMENT_THRESHOLD (Gamma distribution)
-#    Controls when to stop adding features to ensemble
-GREEDY_THRESH_SHAPE = 2000.0
-GREEDY_THRESH_SCALE = 0.00001
-GREEDY_THRESH_MIN = 0.02
-GREEDY_THRESH_MAX = 0.04
-
 # Common update parameters
 HP_UPDATE_WEIGHT = 1.0
 PREDICTION_SUCCESS_THRESHOLD = 1.0
@@ -147,7 +108,7 @@ GREEDY_CANDIDATES = 30
 DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD = 0.001
 
 # MC pre-filter (default, will be overridden by learned value)
-USE_MC_PREFILTER = True
+USE_MC_PREFILTER = False
 DEFAULT_MC_CONFIDENCE_LEVEL = 0.90
 
 # Enhanced priors
@@ -256,225 +217,6 @@ class PriorStrengthBelief:
 
 
 # ============================================================
-# SELECTION HYPERPARAMETER BELIEFS
-# ============================================================
-
-@dataclass
-class ProbabilityThresholdBelief:
-    """
-    Beta belief over MIN_PROBABILITY_POSITIVE threshold.
-
-    This threshold determines which features are eligible for selection.
-    Higher threshold = more selective (only high-confidence features)
-    Lower threshold = less selective (more features available)
-
-    We learn this by tracking:
-    - If selected features outperform -> threshold was good
-    - If selected features underperform -> threshold might need adjustment
-
-    Update logic:
-    - Good outcomes with current threshold -> reinforce current value
-    - Bad outcomes -> encourage exploration (increase variance)
-    """
-    alpha: float = PROB_THRESH_PRIOR_ALPHA
-    beta: float = PROB_THRESH_PRIOR_BETA
-    thresh_min: float = PROB_THRESH_MIN
-    thresh_max: float = PROB_THRESH_MAX
-    outcome_history: List[Tuple[float, float, int]] = field(default_factory=list)  # (threshold, alpha, n_selected)
-
-    def mean(self) -> float:
-        """Expected threshold."""
-        beta_mean = self.alpha / (self.alpha + self.beta)
-        return self.thresh_min + beta_mean * (self.thresh_max - self.thresh_min)
-
-    def sample(self) -> float:
-        """Sample from posterior."""
-        beta_sample = np.random.beta(self.alpha, self.beta)
-        return self.thresh_min + beta_sample * (self.thresh_max - self.thresh_min)
-
-    def ci(self, confidence: float = 0.90) -> Tuple[float, float]:
-        """Credible interval."""
-        lower_q = (1 - confidence) / 2
-        upper_q = 1 - lower_q
-        beta_lower = stats.beta.ppf(lower_q, self.alpha, self.beta)
-        beta_upper = stats.beta.ppf(upper_q, self.alpha, self.beta)
-        return (self.thresh_min + beta_lower * (self.thresh_max - self.thresh_min),
-                self.thresh_min + beta_upper * (self.thresh_max - self.thresh_min))
-
-    def update(self, threshold_used: float, realized_alpha: float, n_features_selected: int):
-        """
-        Update based on outcome with current threshold.
-
-        Logic:
-        - Positive alpha with reasonable features -> threshold is good
-        - Negative alpha -> maybe threshold should be different
-        - Too few features -> threshold might be too strict
-        - Many features with positive alpha -> threshold could be stricter
-        """
-        self.outcome_history.append((threshold_used, realized_alpha, n_features_selected))
-
-        # Normalize threshold to [0, 1] for update calculation
-        normalized_thresh = (threshold_used - self.thresh_min) / (self.thresh_max - self.thresh_min)
-
-        if realized_alpha > 0:
-            # Good outcome - reinforce current threshold direction
-            if n_features_selected >= 3:
-                # Good outcome with decent feature count - threshold is appropriate
-                # Slightly reinforce towards current value
-                self.alpha += HP_UPDATE_WEIGHT * 0.3 * normalized_thresh
-                self.beta += HP_UPDATE_WEIGHT * 0.3 * (1 - normalized_thresh)
-            else:
-                # Good outcome but few features - maybe threshold too strict
-                # Encourage lower threshold
-                self.beta += HP_UPDATE_WEIGHT * 0.2
-        else:
-            # Bad outcome - encourage exploration
-            # Add small amount to both to increase uncertainty
-            self.alpha += HP_UPDATE_WEIGHT * 0.1
-            self.beta += HP_UPDATE_WEIGHT * 0.1
-
-
-@dataclass
-class MCConfidenceBelief:
-    """
-    Beta belief over MC_CONFIDENCE_LEVEL.
-
-    This controls how strict the Monte Carlo pre-filter is.
-    Higher confidence = stricter filter (fewer features pass)
-    Lower confidence = looser filter (more features pass)
-
-    Update logic:
-    - If MC-passing features perform well -> confidence level is appropriate
-    - If MC-passing features perform poorly -> adjust confidence
-    """
-    alpha: float = MC_CONF_PRIOR_ALPHA
-    beta: float = MC_CONF_PRIOR_BETA
-    conf_min: float = MC_CONF_MIN
-    conf_max: float = MC_CONF_MAX
-    outcome_history: List[Tuple[float, float, int]] = field(default_factory=list)  # (conf, alpha, n_passing)
-
-    def mean(self) -> float:
-        """Expected confidence level."""
-        beta_mean = self.alpha / (self.alpha + self.beta)
-        return self.conf_min + beta_mean * (self.conf_max - self.conf_min)
-
-    def sample(self) -> float:
-        """Sample from posterior."""
-        beta_sample = np.random.beta(self.alpha, self.beta)
-        return self.conf_min + beta_sample * (self.conf_max - self.conf_min)
-
-    def ci(self, confidence: float = 0.90) -> Tuple[float, float]:
-        """Credible interval."""
-        lower_q = (1 - confidence) / 2
-        upper_q = 1 - lower_q
-        beta_lower = stats.beta.ppf(lower_q, self.alpha, self.beta)
-        beta_upper = stats.beta.ppf(upper_q, self.alpha, self.beta)
-        return (self.conf_min + beta_lower * (self.conf_max - self.conf_min),
-                self.conf_min + beta_upper * (self.conf_max - self.conf_min))
-
-    def update(self, conf_used: float, realized_alpha: float, n_features_passing: int):
-        """
-        Update based on outcome with current confidence level.
-
-        Logic:
-        - Positive alpha -> confidence level is working
-        - Negative alpha with many passing features -> maybe too loose
-        - Negative alpha with few passing features -> maybe too strict
-        """
-        self.outcome_history.append((conf_used, realized_alpha, n_features_passing))
-
-        # Normalize confidence to [0, 1]
-        normalized_conf = (conf_used - self.conf_min) / (self.conf_max - self.conf_min)
-
-        if realized_alpha > 0:
-            # Good outcome - reinforce current confidence direction
-            self.alpha += HP_UPDATE_WEIGHT * 0.3 * normalized_conf
-            self.beta += HP_UPDATE_WEIGHT * 0.3 * (1 - normalized_conf)
-        else:
-            # Bad outcome
-            if n_features_passing > 10:
-                # Many features passed but bad outcome - maybe too loose, increase confidence
-                self.alpha += HP_UPDATE_WEIGHT * 0.2
-            elif n_features_passing < 3:
-                # Few features passed and bad outcome - maybe too strict, decrease confidence
-                self.beta += HP_UPDATE_WEIGHT * 0.2
-            else:
-                # Moderate features, just increase uncertainty
-                self.alpha += HP_UPDATE_WEIGHT * 0.1
-                self.beta += HP_UPDATE_WEIGHT * 0.1
-
-
-@dataclass
-class GreedyThresholdBelief:
-    """
-    Gamma belief over GREEDY_IMPROVEMENT_THRESHOLD.
-
-    This controls when to stop adding features to the ensemble.
-    Higher threshold = stop earlier (smaller ensembles)
-    Lower threshold = keep adding (larger ensembles)
-
-    Update logic:
-    - Good outcomes with current ensemble size -> threshold appropriate
-    - Bad outcomes -> encourage exploration
-    """
-    shape: float = GREEDY_THRESH_SHAPE
-    rate: float = 1.0 / GREEDY_THRESH_SCALE
-    thresh_min: float = GREEDY_THRESH_MIN
-    thresh_max: float = GREEDY_THRESH_MAX
-    outcome_history: List[Tuple[float, float, int]] = field(default_factory=list)  # (thresh, alpha, ensemble_size)
-
-    def mean(self) -> float:
-        """Expected threshold."""
-        gamma_mean = self.shape / self.rate
-        # Clip to range
-        return np.clip(gamma_mean, self.thresh_min, self.thresh_max)
-
-    def sample(self) -> float:
-        """Sample from posterior."""
-        gamma_sample = np.random.gamma(self.shape, 1.0 / self.rate)
-        return np.clip(gamma_sample, self.thresh_min, self.thresh_max)
-
-    def ci(self, confidence: float = 0.90) -> Tuple[float, float]:
-        """Credible interval."""
-        lower_q = (1 - confidence) / 2
-        upper_q = 1 - lower_q
-        gamma_lower = stats.gamma.ppf(lower_q, self.shape, scale=1.0/self.rate)
-        gamma_upper = stats.gamma.ppf(upper_q, self.shape, scale=1.0/self.rate)
-        return (np.clip(gamma_lower, self.thresh_min, self.thresh_max),
-                np.clip(gamma_upper, self.thresh_min, self.thresh_max))
-
-    def update(self, thresh_used: float, realized_alpha: float, ensemble_size: int):
-        """
-        Update based on outcome with current threshold.
-
-        Logic:
-        - Good outcome with small ensemble -> threshold appropriate or could be higher
-        - Good outcome with large ensemble -> threshold appropriate
-        - Bad outcome with small ensemble -> maybe stopping too early
-        - Bad outcome with large ensemble -> maybe adding too many
-        """
-        self.outcome_history.append((thresh_used, realized_alpha, ensemble_size))
-
-        if realized_alpha > 0:
-            # Good outcome - reinforce current threshold
-            self.shape += HP_UPDATE_WEIGHT * 0.2
-        else:
-            # Bad outcome
-            if ensemble_size <= 2:
-                # Small ensemble, bad outcome - maybe threshold too high (stopping too early)
-                # Decrease threshold by increasing rate (lowers mean)
-                self.rate += HP_UPDATE_WEIGHT * 0.5
-            elif ensemble_size >= 8:
-                # Large ensemble, bad outcome - maybe threshold too low (adding too many)
-                # Increase threshold by increasing shape (raises mean)
-                self.shape += HP_UPDATE_WEIGHT * 0.3
-            else:
-                # Moderate size, just increase uncertainty
-                self.shape += HP_UPDATE_WEIGHT * 0.05
-                self.rate += HP_UPDATE_WEIGHT * 0.05
-
-
-# ============================================================
 # FEATURE BELIEF
 # ============================================================
 
@@ -515,14 +257,11 @@ class FeatureBelief:
 
 class BeliefState:
     """
-    Maintains Bayesian beliefs for features and 5 learned hyperparameters.
+    Maintains Bayesian beliefs for features and 2 learned hyperparameters.
 
     Learned hyperparameters:
     1. decay_belief: How quickly to forget old observations
     2. prior_strength_belief: How much to trust MC priors
-    3. prob_threshold_belief: Min probability positive for feature selection
-    4. mc_confidence_belief: MC pre-filter confidence level
-    5. greedy_threshold_belief: When to stop adding features to ensemble
     """
 
     def __init__(self, n_features: int, feature_names: List[str]):
@@ -536,28 +275,12 @@ class BeliefState:
         # Hyperparameter beliefs
         self.decay_belief = DecayBelief()
         self.prior_strength_belief = PriorStrengthBelief()
-        self.prob_threshold_belief = ProbabilityThresholdBelief()
-        self.mc_confidence_belief = MCConfidenceBelief()
-        self.greedy_threshold_belief = GreedyThresholdBelief()
 
     def get_decay(self) -> float:
         return self.decay_belief.mean()
 
     def get_prior_strength(self) -> float:
         return self.prior_strength_belief.mean()
-
-    def get_alpha_weight(self) -> float:
-        """Returns 1.0 (pure IR optimization, no blending)."""
-        return 1.0
-
-    def get_prob_threshold(self) -> float:
-        return self.prob_threshold_belief.mean()
-
-    def get_mc_confidence(self) -> float:
-        return self.mc_confidence_belief.mean()
-
-    def get_greedy_threshold(self) -> float:
-        return self.greedy_threshold_belief.mean()
 
     def set_prior_from_mc(self, feat_idx: int, ir_mean: float, ir_std: float,
                           hitrate_mu: float = 0.0):
@@ -625,28 +348,9 @@ class BeliefState:
             else:
                 belief.sigma = belief.prior_sigma
 
-        # Update hyperparameter beliefs (alpha_weight fixed at 1.0)
+        # Update hyperparameter beliefs
         self.decay_belief.update(posterior_predicted, observed_alpha, prediction_std)
         self.prior_strength_belief.update(prior_predicted, observed_alpha, prediction_std)
-
-    def update_selection_hyperparameters(self, realized_alpha: float,
-                                          n_features_selected: int,
-                                          n_mc_passing: int,
-                                          ensemble_size: int):
-        """
-        Update selection hyperparameters based on outcomes.
-
-        Called once per period after we observe the realized alpha.
-        """
-        # Get current values used
-        prob_thresh = self.get_prob_threshold()
-        mc_conf = self.get_mc_confidence()
-        greedy_thresh = self.get_greedy_threshold()
-
-        # Update each belief
-        self.prob_threshold_belief.update(prob_thresh, realized_alpha, n_features_selected)
-        self.mc_confidence_belief.update(mc_conf, realized_alpha, n_mc_passing)
-        self.greedy_threshold_belief.update(greedy_thresh, realized_alpha, ensemble_size)
 
     def get_feature_scores(self, method: str = 'expected_ir') -> np.ndarray:
         scores = np.zeros(self.n_features)
@@ -962,9 +666,9 @@ def select_features_greedy_bayesian(belief_state: BeliefState,
     """
     n_features = belief_state.n_features
 
-    # Get learned thresholds
-    min_prob_positive = belief_state.get_prob_threshold()
-    greedy_improvement_thresh = belief_state.get_greedy_threshold()
+    # Use fixed thresholds (removed learned hyperparameters)
+    min_prob_positive = DEFAULT_MIN_PROBABILITY_POSITIVE
+    greedy_improvement_thresh = DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD
 
     ir_scores = belief_state.get_feature_scores('expected_ir')
     prob_positive = belief_state.get_feature_scores('probability_positive')
@@ -1053,8 +757,8 @@ def select_features_bayesian(belief_state: BeliefState,
     if method == 'greedy_bayesian':
         return select_features_greedy_bayesian(belief_state, candidate_mask)
 
-    # Get learned probability threshold
-    min_prob_positive = belief_state.get_prob_threshold()
+    # Use fixed probability threshold (removed learned hyperparameter)
+    min_prob_positive = DEFAULT_MIN_PROBABILITY_POSITIVE
 
     scores = belief_state.get_feature_scores(method)
     scores[~candidate_mask] = -np.inf
@@ -1124,8 +828,8 @@ def get_mc_passing_features(belief_state: BeliefState, data: dict,
     baseline_hr = np.mean(valid_hr)
     baseline_ir = np.mean(valid_ir)
 
-    # Get learned confidence level for feature filtering
-    mc_confidence = belief_state.get_mc_confidence()
+    # Use fixed confidence level for feature filtering (removed learned hyperparameter)
+    mc_confidence = DEFAULT_MC_CONFIDENCE_LEVEL
     t_crit = stats.t.ppf(mc_confidence, df=max(1, mc_n_samples - 1))
 
     for feat_idx in range(n_features):
@@ -1190,9 +894,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
     # Persist ALL hyperparameter beliefs across months
     persistent_decay_belief = None
     persistent_prior_strength_belief = None
-    persistent_prob_threshold_belief = None
-    persistent_mc_confidence_belief = None
-    persistent_greedy_threshold_belief = None
 
     iterator = range(test_start_idx, len(dates))
     if show_progress:
@@ -1222,9 +923,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             if persistent_decay_belief is not None:
                 belief_state.decay_belief = persistent_decay_belief
                 belief_state.prior_strength_belief = persistent_prior_strength_belief
-                belief_state.prob_threshold_belief = persistent_prob_threshold_belief
-                belief_state.mc_confidence_belief = persistent_mc_confidence_belief
-                belief_state.greedy_threshold_belief = persistent_greedy_threshold_belief
 
             initialize_beliefs_from_mc(belief_state, data, n_satellites, test_idx)
             update_beliefs_from_history(belief_state, data, n_satellites, test_idx)
@@ -1232,9 +930,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             # Save updated hyperparameter beliefs
             persistent_decay_belief = belief_state.decay_belief
             persistent_prior_strength_belief = belief_state.prior_strength_belief
-            persistent_prob_threshold_belief = belief_state.prob_threshold_belief
-            persistent_mc_confidence_belief = belief_state.mc_confidence_belief
-            persistent_greedy_threshold_belief = belief_state.greedy_threshold_belief
 
             # Re-get MC passing with updated beliefs
             if USE_MC_PREFILTER:
@@ -1283,13 +978,9 @@ def walk_forward_backtest(data: dict, n_satellites: int,
 
         avg_alpha = np.mean(alphas)
 
-        # Get current hyperparameters
+        # Get learned hyperparameters (2 total)
         current_decay = belief_state.get_decay()
         current_prior_strength = belief_state.get_prior_strength()
-        current_alpha_weight = belief_state.get_alpha_weight()  # Always 1.0 (pure IR)
-        current_prob_threshold = belief_state.get_prob_threshold()
-        current_mc_confidence = belief_state.get_mc_confidence()
-        current_greedy_threshold = belief_state.get_greedy_threshold()
 
         results.append({
             'date': test_date,
@@ -1300,10 +991,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'n_mc_passing': n_mc_passing,
             'learned_decay': current_decay,
             'learned_prior_strength': current_prior_strength,
-            'learned_alpha_weight': current_alpha_weight,
-            'learned_prob_threshold': current_prob_threshold,
-            'learned_mc_confidence': current_mc_confidence,
-            'learned_greedy_threshold': current_greedy_threshold,
             'selected_isins': ','.join(selected_isin_names)
         })
 
@@ -1312,10 +999,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'date': test_date,
             'decay': current_decay,
             'prior_strength': current_prior_strength,
-            'alpha_weight': current_alpha_weight,
-            'prob_threshold': current_prob_threshold,
-            'mc_confidence': current_mc_confidence,
-            'greedy_threshold': current_greedy_threshold,
         })
 
         # Update feature beliefs
@@ -1333,14 +1016,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
 
                     if not np.isnan(feat_alpha):
                         belief_state.update(feat_idx, feat_alpha, weight=1.0)
-
-            # Update NEW selection hyperparameters based on outcome
-            belief_state.update_selection_hyperparameters(
-                realized_alpha=avg_alpha,
-                n_features_selected=len(selected_features),
-                n_mc_passing=n_mc_passing,
-                ensemble_size=len(selected_features)
-            )
 
     return pd.DataFrame(results), hp_diagnostics
 
@@ -1363,20 +1038,11 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
     results_df['cumulative'] = (1 + results_df['avg_alpha']).cumprod() - 1
     total_return = results_df['cumulative'].iloc[-1]
 
-    # Hyperparameter stats
+    # Hyperparameter stats (2 learned parameters)
     avg_decay = results_df['learned_decay'].mean()
     final_decay = results_df['learned_decay'].iloc[-1]
     avg_prior_strength = results_df['learned_prior_strength'].mean()
     final_prior_strength = results_df['learned_prior_strength'].iloc[-1]
-    # alpha_weight always 1.0 (pure IR optimization)
-    avg_alpha_weight = results_df['learned_alpha_weight'].mean()
-    final_alpha_weight = results_df['learned_alpha_weight'].iloc[-1]
-    avg_prob_threshold = results_df['learned_prob_threshold'].mean()
-    final_prob_threshold = results_df['learned_prob_threshold'].iloc[-1]
-    avg_mc_confidence = results_df['learned_mc_confidence'].mean()
-    final_mc_confidence = results_df['learned_mc_confidence'].iloc[-1]
-    avg_greedy_threshold = results_df['learned_greedy_threshold'].mean()
-    final_greedy_threshold = results_df['learned_greedy_threshold'].iloc[-1]
 
     return {
         'n_satellites': n_satellites,
@@ -1391,14 +1057,6 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
         'final_decay': final_decay,
         'avg_prior_strength': avg_prior_strength,
         'final_prior_strength': final_prior_strength,
-        'avg_alpha_weight': avg_alpha_weight,
-        'final_alpha_weight': final_alpha_weight,
-        'avg_prob_threshold': avg_prob_threshold,
-        'final_prob_threshold': final_prob_threshold,
-        'avg_mc_confidence': avg_mc_confidence,
-        'final_mc_confidence': final_mc_confidence,
-        'avg_greedy_threshold': avg_greedy_threshold,
-        'final_greedy_threshold': final_greedy_threshold,
     }
 
 
@@ -1410,9 +1068,9 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
     df = pd.DataFrame(hp_diagnostics)
 
     print(f"\n  Hyperparameter Evolution (N={n_satellites}):")
-    print(f"  " + "-" * 110)
-    print(f"  {'Date':<12} {'Decay':>8} {'Prior':>8} {'AlphaW':>8} {'ProbThr':>8} {'MCConf':>8} {'GreedyT':>10}")
-    print(f"  " + "-" * 110)
+    print(f"  " + "-" * 50)
+    print(f"  {'Date':<12} {'Decay':>8} {'Prior':>8}")
+    print(f"  " + "-" * 50)
 
     indices = [0]
     for i in range(12, len(df), 12):
@@ -1423,11 +1081,9 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
     for idx in indices:
         row = df.iloc[idx]
         date_str = row['date'].strftime('%Y-%m')
-        print(f"  {date_str:<12} {row['decay']:>8.4f} {row['prior_strength']:>8.1f} "
-              f"{row['alpha_weight']:>8.3f} {row['prob_threshold']:>8.3f} "
-              f"{row['mc_confidence']:>8.3f} {row['greedy_threshold']:>10.5f}")
+        print(f"  {date_str:<12} {row['decay']:>8.4f} {row['prior_strength']:>8.1f}")
 
-    print(f"  " + "-" * 110)
+    print(f"  " + "-" * 50)
 
 
 # ============================================================
@@ -1435,20 +1091,16 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
 # ============================================================
 
 def main():
-    """Run Bayesian strategy backtest with 6 learned hyperparameters."""
+    """Run Bayesian strategy backtest with 2 learned hyperparameters (decay + prior_strength)."""
     print("=" * 70)
     print("BAYESIAN STRATEGY WITH LEARNED HYPERPARAMETERS")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  Holding period: {HOLDING_MONTHS} month")
     print(f"  N values to test: {N_SATELLITES_TO_TEST}")
-    print(f"\nLearned Hyperparameters (5 total - removed alpha_weight):")
+    print(f"\nLearned Hyperparameters (2 total):")
     print(f"  1. Decay Rate: Beta({DECAY_PRIOR_ALPHA}, {DECAY_PRIOR_BETA}) -> [{DECAY_MIN}, {DECAY_MAX}]")
     print(f"  2. Prior Strength: Gamma({PRIOR_STRENGTH_SHAPE}, {PRIOR_STRENGTH_SCALE}) -> [{PRIOR_STRENGTH_MIN}, {PRIOR_STRENGTH_MAX}]")
-    print(f"  3. [REMOVED] Alpha Weight - Pure IR optimization (no blending)")
-    print(f"  4. Prob Threshold: Beta({PROB_THRESH_PRIOR_ALPHA}, {PROB_THRESH_PRIOR_BETA}) -> [{PROB_THRESH_MIN}, {PROB_THRESH_MAX}]")
-    print(f"  5. MC Confidence: Beta({MC_CONF_PRIOR_ALPHA}, {MC_CONF_PRIOR_BETA}) -> [{MC_CONF_MIN}, {MC_CONF_MAX}]")
-    print(f"  6. Greedy Threshold: Gamma({GREEDY_THRESH_SHAPE}, {GREEDY_THRESH_SCALE}) -> [{GREEDY_THRESH_MIN}, {GREEDY_THRESH_MAX}]")
     print(f"\nFeature Selection:")
     print(f"  Method: {SELECTION_METHOD}")
     print(f"  MC pre-filter: {USE_MC_PREFILTER}")
@@ -1487,10 +1139,6 @@ def main():
                 print(f"\n  Learned Hyperparameters (final):")
                 print(f"    Decay: {stats['final_decay']:.4f}")
                 print(f"    Prior Strength: {stats['final_prior_strength']:.1f}")
-                print(f"    Alpha Weight: {stats['final_alpha_weight']:.3f}")
-                print(f"    Prob Threshold: {stats['final_prob_threshold']:.3f}")
-                print(f"    MC Confidence: {stats['final_mc_confidence']:.3f}")
-                print(f"    Greedy Threshold: {stats['final_greedy_threshold']:.5f}")
 
                 print_hp_evolution(hp_diagnostics, n)
 
@@ -1512,18 +1160,16 @@ def main():
 
         print("\n" + "-" * 140)
         print(f"{'N':>3} {'Periods':>8} {'Monthly':>10} {'Annual':>10} {'Hit Rate':>10} "
-              f"{'IR':>8} {'Decay':>7} {'Prior':>7} {'AlphaW':>7} {'ProbT':>7} {'MCConf':>7} {'GreedyT':>9}")
-        print("-" * 140)
+              f"{'IR':>8} {'Decay':>7} {'Prior':>7}")
+        print("-" * 75)
 
         for _, row in summary_df.sort_values('n_satellites').iterrows():
             print(f"{int(row['n_satellites']):>3} {int(row['n_periods']):>8} "
                   f"{row['avg_alpha']*100:>9.2f}% {row['annual_alpha']*100:>9.1f}% "
                   f"{row['hit_rate']:>9.1%} {row['information_ratio']:>8.3f} "
-                  f"{row['final_decay']:>7.3f} {row['final_prior_strength']:>7.1f} "
-                  f"{row['final_alpha_weight']:>7.2f} {row['final_prob_threshold']:>7.2f} "
-                  f"{row['final_mc_confidence']:>7.2f} {row['final_greedy_threshold']:>9.5f}")
+                  f"{row['final_decay']:>7.3f} {row['final_prior_strength']:>7.1f}")
 
-        print("-" * 140)
+        print("-" * 75)
 
         # Best by Information Ratio
         best_idx = summary_df['information_ratio'].idxmax()
@@ -1532,10 +1178,7 @@ def main():
         print(f"  Information Ratio: {best['information_ratio']:.3f}")
         print(f"  Hit Rate: {best['hit_rate']:.1%}")
         print(f"  Annual Alpha: {best['annual_alpha']*100:.1f}%")
-        print(f"  Learned (final): Decay={best['final_decay']:.3f}, Prior={best['final_prior_strength']:.1f}, "
-              f"AlphaW={best['final_alpha_weight']:.2f}")
-        print(f"                   ProbT={best['final_prob_threshold']:.2f}, MCConf={best['final_mc_confidence']:.2f}, "
-              f"GreedyT={best['final_greedy_threshold']:.5f}")
+        print(f"  Learned (final): Decay={best['final_decay']:.3f}, Prior={best['final_prior_strength']:.1f}")
 
         # Save summary
         summary_file = OUTPUT_DIR / 'bayesian_backtest_summary.csv'

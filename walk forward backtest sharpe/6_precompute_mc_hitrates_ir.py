@@ -6,16 +6,19 @@ INFORMATION RATIO OPTIMIZATION PROJECT - Step 6
 
 - Uses feature_ir_{N}month.npz (from step 5 - IR computation)
 - Computes IR STATISTICS from MC simulations
-- Processes all 7,618 features without pre-filtering
+- Processes ALL 7,618 features WITHOUT pre-filtering (true Bayesian approach)
 
 For each feature at each test date, runs 5M (configurable) Monte Carlo
 simulations to estimate:
 - IR mean (average Information Ratio from MC)
 - IR standard deviation (uncertainty in IR)
-- Hit rate (probability of positive IR - for secondary filtering)
-- Confidence intervals
+- Hit rate (probability of positive IR)
 
-These statistics are used by the Bayesian strategy to estimate feature quality and optimize for IR.
+These statistics enable true Bayesian learning where:
+- Features start with weak priors
+- Evidence accumulates over time
+- Even initially poor features can be reconsidered if they improve
+- Allows discovery of features that were dormant but become relevant
 
 MC_SAMPLES_PER_MONTH = 5_000_000 (configurable for tighter/looser CIs)
 
@@ -63,8 +66,7 @@ sys.path.insert(0, str(project_root))
 HOLDING_MONTHS = 1
 N_SATELLITES_TO_PRECOMPUTE = [3, 4, 5, 6, 7]
 MIN_TRAINING_MONTHS = 36
-MIN_ALPHA = 0.00
-MIN_HIT_RATE = 0.5
+# Note: No pre-filtering - all 7,618 features evaluated for true Bayesian learning
 DECAY_HALF_LIFE_MONTHS = 54
 
 # Monte Carlo settings
@@ -75,7 +77,7 @@ MC_MIN_SAMPLES = 100
 # GPU settings
 GPU_BLOCK_SIZE = 256
 
-FORCE_RECOMPUTE = False
+FORCE_RECOMPUTE = True
 DATA_DIR = Path(__file__).parent / 'data'
 
 
@@ -362,9 +364,11 @@ def precompute_candidates_all_dates(data, n_satellites, test_start_idx):
     """
     Precompute candidate features for ALL test dates at once.
 
-    Filters features by:
-    - Positive IR with good hit rate
-    - Negative IR (inverted) with high miss rate
+    NO PRE-FILTERING: All 7,618 features are treated as candidates.
+    This enables true Bayesian learning where beliefs can be updated
+    based on realized outcomes, even for initially low-performing features.
+
+    Features with negative IR can still be used (inverted).
     """
     feature_ir = data['feature_ir']
     feature_hit = data['feature_hit']
@@ -376,19 +380,16 @@ def precompute_candidates_all_dates(data, n_satellites, test_start_idx):
         feature_ir, feature_hit, n_satellites, test_start_idx, n_dates
     )
 
-    candidate_mask = np.zeros((n_test_dates, n_features), dtype=np.bool_)
+    # ALL features are candidates (no pre-filtering)
+    candidate_mask = np.ones((n_test_dates, n_features), dtype=np.bool_)
+
+    # Mark features with negative IR as inverted (could potentially short these)
     inverted_mask = np.zeros((n_test_dates, n_features), dtype=np.bool_)
 
     for test_offset in range(n_test_dates):
         avg_irs = all_avg_irs[test_offset]
-        hit_rates = all_hit_rates[test_offset]
-
-        # Filter by IR: positive IR with good hit rate, or negative IR to invert
-        positive_mask = (avg_irs >= MIN_ALPHA) & (hit_rates >= MIN_HIT_RATE) & (avg_irs > -900)
-        negative_mask = (avg_irs <= -MIN_ALPHA) & ((1 - hit_rates) >= MIN_HIT_RATE) & (avg_irs > -900)
-
-        candidate_mask[test_offset] = positive_mask | negative_mask
-        inverted_mask[test_offset] = negative_mask
+        # Mark as inverted if IR is clearly negative (exclude NaN/sentinel values)
+        inverted_mask[test_offset] = (avg_irs < 0) & (avg_irs > -900)
 
     return candidate_mask, inverted_mask
 
@@ -663,7 +664,7 @@ def save_mc_hitrates(mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
         features=feature_names,
         test_start_idx=test_start_idx,
         config={
-            'min_alpha': MIN_ALPHA, 'min_hit_rate': MIN_HIT_RATE,
+            'no_prefiltering': True, 'all_features_evaluated': True,
             'decay_half_life': DECAY_HALF_LIFE_MONTHS,
             'mc_samples_per_month': MC_SAMPLES_PER_MONTH,
             'mc_ensemble_sizes': MC_ENSEMBLE_SIZES,
