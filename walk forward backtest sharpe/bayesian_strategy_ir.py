@@ -1,22 +1,19 @@
 """
-Step 8 (SHARPE OPTIMIZATION): Bayesian Strategy with Pure Sharpe Optimization
-===============================================================================
+Phase 4: Bayesian Strategy with Information Ratio Optimization
+==============================================================
 
-PHASE 4 OF SHARPE OPTIMIZATION PROJECT:
-- Uses mc_sharpe_mean_{N}month.npz (from step 6 sharpe)
-- Optimizes PURE SHARPE instead of hybrid metric (alpha + hitrate blend)
+INFORMATION RATIO OPTIMIZATION PROJECT - Step 8
+
+- Uses mc_ir_mean_{N}month.npz (from step 6 - IR MC statistics)
+- Optimizes INFORMATION RATIO for Bayesian feature selection
 - Processes all 7,618 features without pre-filtering
 
-Key Changes from Original:
-    OLD: Optimizes hybrid metric = (alpha_weight * alpha + (1 - alpha_weight) * hitrate) / alpha_std
-    NEW: Optimizes pure Sharpe = sharpe_mean / sharpe_std (risk-adjusted returns directly)
+Bayesian feature selection learned from MC-simulated Information Ratio statistics.
 
 This is the main Bayesian satellite selection strategy. It uses walk-forward
 backtesting with 5 globally learned hyperparameters that adapt over time.
-(Removed alpha_weight hyperparameter - no longer needed with pure Sharpe)
-
-LEARNED HYPERPARAMETERS (5 total - was 6):
-------------------------------------------
+LEARNED HYPERPARAMETERS (5 total):
+----------------------------------
 1. DECAY RATE - Beta prior, controls observation forgetting
    - Higher decay = remember more history
    - Lower decay = adapt faster to recent data
@@ -25,35 +22,24 @@ LEARNED HYPERPARAMETERS (5 total - was 6):
    - Higher = trust MC simulations more
    - Lower = let observed data dominate faster
 
-3. [REMOVED] ALPHA-HITRATE WEIGHT - No longer needed!
-   - OLD: Balanced alpha vs hit rate in hybrid metric
-   - NEW: Pure Sharpe optimization - no blending
-
-4. MIN_PROBABILITY_POSITIVE - Beta prior
-   - Threshold for feature selection (P(alpha > 0) must exceed this)
+3. MIN_PROBABILITY_POSITIVE - Beta prior
+   - Threshold for feature selection (P(IR > 0) must exceed this)
    - Higher = more selective, fewer features
 
-5. MC_CONFIDENCE_LEVEL - Beta prior
+4. MC_CONFIDENCE_LEVEL - Beta prior
    - How strict the Monte Carlo pre-filter is
    - Higher = stricter filtering, fewer candidates
 
-6. GREEDY_IMPROVEMENT_THRESHOLD - Gamma prior
+5. GREEDY_IMPROVEMENT_THRESHOLD - Gamma prior
    - When to stop adding features to ensemble
    - Higher = smaller ensembles, lower = larger ensembles
 
-COMPARISON WITH HYBRID (ALL-FEATURES) VERSION:
------------------------------------------------
-Hybrid version (old bayesian_strategy.py):
-  - Uses 7,618 unfiltered features
-  - Optimizes: (alpha_weight * alpha + (1-alpha_weight) * hitrate) / alpha_std
-  - 34.3% annual alpha (N=5) with 1.5M MC
-  - 91.5% hit rate
-
-Pure Sharpe version (this file - PHASE 4):
-  - Uses 7,618 unfiltered features
-  - Optimizes: sharpe_mean / sharpe_std (pure Sharpe ratio)
-  - Expected: Better Sharpe consistency
-  - Pipeline consistency: All steps optimize Sharpe throughout
+INFORMATION RATIO OPTIMIZATION:
+-------------------------------
+  - Consolidates alpha, consistency, and risk into single metric
+  - IR = (portfolio_alpha) / (tracking_error)
+  - Portfolio IR goal: Maximize consistent outperformance vs MSCI World
+  - Uses MC-estimated IR statistics for Bayesian feature selection
 
 RECOMMENDED CONFIGURATION:
 --------------------------
@@ -63,10 +49,10 @@ N=5 satellites is theoretically grounded and empirically validated:
 - Statistical analysis shows N selection is noise (not predictable)
 
 Usage:
-    python bayesian_strategy_proper_allfeatures.py
+    python bayesian_strategy_ir.py
 
 Output:
-    walk forward backtest all features/data/backtest_results/bayesian_backtest_summary.csv
+    data/backtest_results/bayesian_backtest_ir_summary.csv
 """
 
 import sys
@@ -122,11 +108,7 @@ PRIOR_STRENGTH_SCALE = 1.0
 PRIOR_STRENGTH_MIN = 10.0
 PRIOR_STRENGTH_MAX = 200.0
 
-# 3. [PHASE 4 REMOVED] ALPHA-HITRATE WEIGHT - No longer needed
-#    Was used to blend alpha and hitrate in hybrid metric
-#    With pure Sharpe optimization, we optimize Sharpe directly
-# ALPHA_WEIGHT_PRIOR_ALPHA = 10.0  # PHASE 4: REMOVED
-# ALPHA_WEIGHT_PRIOR_BETA = 10.0   # PHASE 4: REMOVED
+# 3. ALPHA-HITRATE WEIGHT - Not used (pure IR optimization)
 
 # ============================================================
 # SELECTION HYPERPARAMETER PRIORS
@@ -147,12 +129,11 @@ MC_CONF_MIN = 0.80              # Minimum confidence
 MC_CONF_MAX = 0.99              # Maximum confidence
 
 # 6. GREEDY_IMPROVEMENT_THRESHOLD (Gamma distribution)
-#    Start at 0.02, allow learning up to 0.04 (was constrained at 0.01)
-#    This removes the artificial clip bound and lets ensemble size grow
+#    Controls when to stop adding features to ensemble
 GREEDY_THRESH_SHAPE = 2000.0
 GREEDY_THRESH_SCALE = 0.00001
-GREEDY_THRESH_MIN = 0.02        # Minimum threshold (was 0.0001)
-GREEDY_THRESH_MAX = 0.04        # Maximum threshold (was 0.01)
+GREEDY_THRESH_MIN = 0.02
+GREEDY_THRESH_MAX = 0.04
 
 # Common update parameters
 HP_UPDATE_WEIGHT = 1.0
@@ -273,15 +254,6 @@ class PriorStrengthBelief:
             update = HP_UPDATE_WEIGHT * min(1.0, excess_error)
             self.rate += update * 0.1
 
-
-# PHASE 4 REMOVED: AlphaWeightBelief class
-# This class was used to learn the blend weight between alpha and hitrate
-# in the hybrid metric. With pure Sharpe optimization, we no longer need it.
-#
-# @dataclass
-# class AlphaWeightBelief:  # PHASE 4: REMOVED - no longer needed
-#     """Beta belief over alpha-hitrate weight."""
-#     # ... implementation removed ...
 
 # ============================================================
 # SELECTION HYPERPARAMETER BELIEFS
@@ -508,36 +480,34 @@ class GreedyThresholdBelief:
 
 @dataclass
 class FeatureBelief:
-    """
-    PHASE 4 MODIFIED: Belief about a feature's true Sharpe distribution (not alpha).
-
-    OLD: Tracked alpha mean and hitrate for hybrid metric
-    NEW: Tracks Sharpe mean and std for pure Sharpe optimization
-    """
-    mu: float = 0.0  # Mean Sharpe (was alpha mean)
-    sigma: float = 0.05  # Sharpe std (was alpha std)
+    """Bayesian belief about a feature's true Information Ratio distribution."""
+    mu: float = 0.0  # Mean IR
+    sigma: float = 0.05  # IR std (uncertainty)
     n_obs: float = 0.0  # Number of observations (for posterior)
-    sum_alpha: float = 0.0  # Sum of Sharpe values (renamed variable for code reuse)
-    sum_sq: float = 0.0  # Sum of squared Sharpe values
+    sum_alpha: float = 0.0  # Cumulative sum of IR values
+    sum_sq: float = 0.0  # Cumulative sum of squared IR values
 
-    prior_mu: float = 0.0  # Prior Sharpe mean (from MC)
-    prior_sigma: float = 0.05  # Prior Sharpe std (from MC)
-    prior_strength: float = 50.0
+    prior_mu: float = 0.0  # Prior IR mean (from MC)
+    prior_sigma: float = 0.05  # Prior IR std (from MC)
+    prior_strength: float = 50.0  # Strength of prior belief
 
-    # PHASE 4: Store Sharpe statistics from MC
-    sharpe_prior_mu: float = 0.0  # PHASE 4: NEW
-    sharpe_prior_sigma: float = 0.05  # PHASE 4: NEW
-    hitrate_prior_mu: float = 0.0  # PHASE 4: Keep for reference (secondary metric)
+    ir_prior_mu: float = 0.0  # IR prior mean (from MC)
+    ir_prior_sigma: float = 0.05  # IR prior std (from MC)
+    hitrate_prior_mu: float = 0.0  # Hit rate prior (secondary metric)
 
     def probability_positive(self) -> float:
         if self.sigma <= 0:
             return 1.0 if self.mu > 0 else 0.0
         return 1 - stats.norm.cdf(-self.mu / self.sigma)
 
-    def expected_sharpe(self) -> float:
+    def expected_ir(self) -> float:
         if self.sigma <= 0:
             return 0.0
         return self.mu / self.sigma
+
+    def expected_sharpe(self) -> float:
+        """Backward compatibility wrapper for expected_ir()."""
+        return self.expected_ir()
 
     def sample(self) -> float:
         return np.random.normal(self.mu, self.sigma)
@@ -545,15 +515,14 @@ class FeatureBelief:
 
 class BeliefState:
     """
-    Maintains beliefs for features AND 5 hyperparameters (PHASE 4: was 6).
+    Maintains Bayesian beliefs for features and 5 learned hyperparameters.
 
-    Hyperparameters learned:
+    Learned hyperparameters:
     1. decay_belief: How quickly to forget old observations
     2. prior_strength_belief: How much to trust MC priors
-    3. [PHASE 4 REMOVED] alpha_weight_belief: No longer needed - pure Sharpe optimization
-    4. prob_threshold_belief: Min probability positive for selection
-    5. mc_confidence_belief: MC pre-filter confidence level
-    6. greedy_threshold_belief: When to stop adding to ensemble
+    3. prob_threshold_belief: Min probability positive for feature selection
+    4. mc_confidence_belief: MC pre-filter confidence level
+    5. greedy_threshold_belief: When to stop adding features to ensemble
     """
 
     def __init__(self, n_features: int, feature_names: List[str]):
@@ -567,7 +536,6 @@ class BeliefState:
         # Hyperparameter beliefs
         self.decay_belief = DecayBelief()
         self.prior_strength_belief = PriorStrengthBelief()
-        # PHASE 4 REMOVED: self.alpha_weight_belief = AlphaWeightBelief()  # No longer used
         self.prob_threshold_belief = ProbabilityThresholdBelief()
         self.mc_confidence_belief = MCConfidenceBelief()
         self.greedy_threshold_belief = GreedyThresholdBelief()
@@ -579,8 +547,8 @@ class BeliefState:
         return self.prior_strength_belief.mean()
 
     def get_alpha_weight(self) -> float:
-        # PHASE 4 REMOVED: No longer needed with pure Sharpe optimization
-        return 1.0  # Keep for backward compatibility, but not used
+        """Returns 1.0 (pure IR optimization, no blending)."""
+        return 1.0
 
     def get_prob_threshold(self) -> float:
         return self.prob_threshold_belief.mean()
@@ -591,34 +559,33 @@ class BeliefState:
     def get_greedy_threshold(self) -> float:
         return self.greedy_threshold_belief.mean()
 
-    def set_prior_from_mc(self, feat_idx: int, sharpe_mean: float, sharpe_std: float,  # PHASE 4: Changed parameters
-                          hitrate_mu: float = 0.0):  # PHASE 4: Added default (kept for reference)
+    def set_prior_from_mc(self, feat_idx: int, ir_mean: float, ir_std: float,
+                          hitrate_mu: float = 0.0):
         """
-        PHASE 4 MODIFIED: Set prior using Sharpe statistics from MC (pure Sharpe optimization).
+        Set prior using IR statistics from MC.
 
-        OLD: Used learned alpha_weight to blend alpha and hitrate
-        NEW: Directly uses Sharpe mean/std for risk-adjusted returns
+        Initializes feature belief from Information Ratio estimates.
         """
         belief = self.beliefs[feat_idx]
 
-        # PHASE 4: Store Sharpe statistics instead of alpha
-        belief.sharpe_prior_mu = sharpe_mean  # PHASE 4: New
-        belief.sharpe_prior_sigma = sharpe_std  # PHASE 4: New
-        belief.hitrate_prior_mu = hitrate_mu  # Keep for reference
+        # Store IR statistics
+        belief.ir_prior_mu = ir_mean
+        belief.ir_prior_sigma = ir_std
+        belief.hitrate_prior_mu = hitrate_mu
 
         prior_strength = self.get_prior_strength()
 
-        # PHASE 4: Use Sharpe directly (no blending)
-        belief.prior_mu = sharpe_mean
-        belief.prior_sigma = sharpe_std
+        # Use IR directly for optimization
+        belief.prior_mu = ir_mean
+        belief.prior_sigma = ir_std
         belief.prior_strength = prior_strength
 
-        # PHASE 4: Initialize from Sharpe statistics
-        belief.mu = sharpe_mean
-        belief.sigma = sharpe_std
+        # Initialize from IR statistics
+        belief.mu = ir_mean
+        belief.sigma = ir_std
         belief.n_obs = prior_strength
-        belief.sum_alpha = sharpe_mean * prior_strength  # Actually sum of Sharpe (renamed from alpha for code reuse)
-        belief.sum_sq = (sharpe_std**2 + sharpe_mean**2) * prior_strength
+        belief.sum_alpha = ir_mean * prior_strength
+        belief.sum_sq = (ir_std**2 + ir_mean**2) * prior_strength
 
     def update(self, feat_idx: int, observed_alpha: float, weight: float = 1.0):
         """Update feature belief and original hyperparameter beliefs."""
@@ -658,11 +625,9 @@ class BeliefState:
             else:
                 belief.sigma = belief.prior_sigma
 
-        # Update hyperparameter beliefs
+        # Update hyperparameter beliefs (alpha_weight fixed at 1.0)
         self.decay_belief.update(posterior_predicted, observed_alpha, prediction_std)
         self.prior_strength_belief.update(prior_predicted, observed_alpha, prediction_std)
-        # PHASE 4 REMOVED: self.alpha_weight_belief.update(...)
-        # No longer learning alpha_weight - optimizing pure Sharpe
 
     def update_selection_hyperparameters(self, realized_alpha: float,
                                           n_features_selected: int,
@@ -683,11 +648,11 @@ class BeliefState:
         self.mc_confidence_belief.update(mc_conf, realized_alpha, n_mc_passing)
         self.greedy_threshold_belief.update(greedy_thresh, realized_alpha, ensemble_size)
 
-    def get_feature_scores(self, method: str = 'expected_sharpe') -> np.ndarray:
+    def get_feature_scores(self, method: str = 'expected_ir') -> np.ndarray:
         scores = np.zeros(self.n_features)
         for i, belief in self.beliefs.items():
-            if method == 'expected_sharpe':
-                scores[i] = belief.expected_sharpe()
+            if method == 'expected_ir' or method == 'expected_sharpe':  # Support both names
+                scores[i] = belief.expected_ir()
             elif method == 'probability_positive':
                 scores[i] = belief.probability_positive()
             elif method == 'mean':
@@ -828,10 +793,10 @@ def load_data():
     alpha_df = pd.read_parquet(alpha_file)
     alpha_df['date'] = pd.to_datetime(alpha_df['date'])
 
-    # PHASE 4: Use Sharpe rankings from step 4
-    rankings_file = DATA_DIR / f'rankings_matrix_sharpe_{horizon_label}.npz'  # PHASE 4: Changed filename
+    # Load IR rankings from step 4
+    rankings_file = DATA_DIR / f'rankings_matrix_ir_{horizon_label}.npz'
     if not rankings_file.exists():
-        raise FileNotFoundError(f"Rankings matrix not found: {rankings_file}\nRun 4_compute_forward_alpha_sharpe.py first.")
+        raise FileNotFoundError(f"Rankings matrix not found: {rankings_file}\nRun 4_compute_forward_alpha_ir.py first.")
 
     npz_data = np.load(rankings_file, allow_pickle=True)
     rankings = npz_data['rankings'].astype(np.float64)
@@ -839,14 +804,14 @@ def load_data():
     isins = npz_data['isins']
     feature_names = list(npz_data['features'])
 
-    # PHASE 4: Use Sharpe MC data instead of alpha MC data
-    mc_file = DATA_DIR / f'mc_sharpe_mean_{horizon_label}.npz'  # PHASE 4: Changed filename
+    # Load MC IR statistics for priors
+    mc_file = DATA_DIR / f'mc_ir_mean_{horizon_label}.npz'
     mc_data = None
     if mc_file.exists():
         mc_data = np.load(mc_file, allow_pickle=True)
-        print(f"  [OK] MC Sharpe data loaded for priors")  # PHASE 4: Updated message
+        print(f"  [OK] MC IR data loaded for priors")
     else:
-        print(f"  [WARN] No MC Sharpe data - using uninformative priors")  # PHASE 4: Updated message
+        print(f"  [WARN] No MC IR data - using uninformative priors")
 
     n_dates = len(dates)
     n_isins = len(isins)
@@ -895,8 +860,8 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
     mc_data = data.get('mc_data')
     if mc_data is None:
         for i in range(belief_state.n_features):
-            belief_state.set_prior_from_mc(i, alpha_mu=0.0, hitrate_mu=0.0,
-                                           mc_sigma=0.03)
+            belief_state.set_prior_from_mc(i, ir_mean=0.0, ir_std=0.03,
+                                           hitrate_mu=0.0)
         return
 
     mc_n_satellites = mc_data['n_satellites']
@@ -904,63 +869,61 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
 
     if n_satellites not in n_to_idx:
         for i in range(belief_state.n_features):
-            # PHASE 4: Use Sharpe parameters instead of alpha
-            belief_state.set_prior_from_mc(i, sharpe_mean=0.0, sharpe_std=0.03,  # PHASE 4: Changed parameters
+            # Use IR parameters as priors
+            belief_state.set_prior_from_mc(i, ir_mean=0.0, ir_std=0.03,
                                            hitrate_mu=0.0)
         return
 
     mc_idx = n_to_idx[n_satellites]
-    # PHASE 4: Load Sharpe data instead of alpha data
-    mc_sharpe_mean = mc_data['mc_sharpe_mean'][mc_idx]  # PHASE 4: Changed key
-    mc_sharpe_std = mc_data['mc_sharpe_std'][mc_idx]    # PHASE 4: Changed key
+    # Load IR data from MC
+    mc_ir_mean = mc_data['mc_ir_mean'][mc_idx]
+    mc_ir_std = mc_data['mc_ir_std'][mc_idx]
     mc_hitrates = mc_data['mc_hitrates'][mc_idx]
     mc_candidate_mask = mc_data['candidate_masks'][mc_idx]
 
     for feat_idx in range(belief_state.n_features):
         valid_dates = []
-        for d in range(min(test_idx, mc_sharpe_mean.shape[0])):  # PHASE 4: Changed variable name
+        for d in range(min(test_idx, mc_ir_mean.shape[0])):
             if mc_candidate_mask[d, feat_idx]:
-                sharpe_mu = mc_sharpe_mean[d, feat_idx]  # PHASE 4: Changed variable name
-                if not np.isnan(sharpe_mu):
+                ir_mu = mc_ir_mean[d, feat_idx]
+                if not np.isnan(ir_mu):
                     valid_dates.append(d)
 
-        # Use any MC data available (FIX #3 threshold of 6 months showed no benefit)
+        # Use any MC data available
         if len(valid_dates) >= MIN_MC_VALID_DATES:
-            sharpe_mus = [mc_sharpe_mean[d, feat_idx] for d in valid_dates]  # PHASE 4: Renamed
-            sharpe_stds = [mc_sharpe_std[d, feat_idx] for d in valid_dates]   # PHASE 4: Renamed
-            avg_sharpe_mu = np.nanmean(sharpe_mus)  # PHASE 4: Renamed
-            avg_sharpe_std = np.nanmean(sharpe_stds)  # PHASE 4: Renamed
+            ir_mus = [mc_ir_mean[d, feat_idx] for d in valid_dates]
+            ir_stds = [mc_ir_std[d, feat_idx] for d in valid_dates]
+            avg_ir_mu = np.nanmean(ir_mus)
+            avg_ir_std = np.nanmean(ir_stds)
 
-            if np.isnan(avg_sharpe_mu):
-                avg_sharpe_mu = 0.0
-            if np.isnan(avg_sharpe_std) or avg_sharpe_std <= 0:
-                avg_sharpe_std = 0.03
+            if np.isnan(avg_ir_mu):
+                avg_ir_mu = 0.0
+            if np.isnan(avg_ir_std) or avg_ir_std <= 0:
+                avg_ir_std = 0.03
 
             hrs = [mc_hitrates[d, feat_idx] for d in valid_dates]
             avg_hr = np.nanmean(hrs)
             if np.isnan(avg_hr):
                 avg_hr = 0.5
-            # PHASE 4: Keep hitrate as secondary metric but don't blend with Sharpe
-            hr_alpha_equiv = (avg_hr - 0.5) * 0.10  # Keep for reference, but not used
 
             if USE_STABILITY_IN_PRIOR and len(valid_dates) >= 3:
-                # PHASE 4: Compute stability factor based on Sharpe values
-                sharpe_cv = np.nanstd(sharpe_mus) / (abs(np.nanmean(sharpe_mus)) + 0.001)  # PHASE 4: Renamed
-                stability_factor = 1.0 + min(1.0, sharpe_cv)
-                adjusted_std = avg_sharpe_std * stability_factor  # PHASE 4: Renamed
+                # Compute stability factor based on IR values
+                ir_cv = np.nanstd(ir_mus) / (abs(np.nanmean(ir_mus)) + 0.001)
+                stability_factor = 1.0 + min(1.0, ir_cv)
+                adjusted_std = avg_ir_std * stability_factor
             else:
-                adjusted_std = avg_sharpe_std  # PHASE 4: Renamed
+                adjusted_std = avg_ir_std
 
             belief_state.set_prior_from_mc(
                 feat_idx,
-                sharpe_mean=avg_sharpe_mu,  # PHASE 4: Changed parameter name
-                sharpe_std=adjusted_std,  # PHASE 4: Changed parameter name
-                hitrate_mu=avg_hr  # PHASE 4: Simplified - just pass hitrate, not blended
+                ir_mean=avg_ir_mu,
+                ir_std=adjusted_std,
+                hitrate_mu=avg_hr
             )
         else:
-            # PHASE 4: Use Sharpe parameters with default values
+            # Use IR parameters with default values
             belief_state.set_prior_from_mc(
-                feat_idx, sharpe_mean=0.0, sharpe_std=0.03, hitrate_mu=0.0  # PHASE 4: Changed parameters
+                feat_idx, ir_mean=0.0, ir_std=0.03, hitrate_mu=0.0
             )
 
 
@@ -999,24 +962,24 @@ def select_features_greedy_bayesian(belief_state: BeliefState,
     """
     n_features = belief_state.n_features
 
-    # Get LEARNED thresholds
+    # Get learned thresholds
     min_prob_positive = belief_state.get_prob_threshold()
     greedy_improvement_thresh = belief_state.get_greedy_threshold()
 
-    sharpe_scores = belief_state.get_feature_scores('expected_sharpe')
+    ir_scores = belief_state.get_feature_scores('expected_ir')
     prob_positive = belief_state.get_feature_scores('probability_positive')
     mean_alpha = belief_state.get_feature_scores('mean')
 
     valid_candidates = []
     for i in range(n_features):
-        # Use LEARNED probability threshold
+        # Filter by learned probability threshold
         if candidate_mask[i] and prob_positive[i] >= min_prob_positive:
             valid_candidates.append(i)
 
     if len(valid_candidates) == 0:
         return [], 0
 
-    candidate_scores = [(i, sharpe_scores[i], mean_alpha[i]) for i in valid_candidates]
+    candidate_scores = [(i, ir_scores[i], mean_alpha[i]) for i in valid_candidates]
     candidate_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
     top_candidates = [x[0] for x in candidate_scores[:GREEDY_CANDIDATES]]
 
@@ -1041,7 +1004,7 @@ def select_features_greedy_bayesian(belief_state: BeliefState,
                 best_improvement = improvement
                 best_candidate = candidate
 
-        # Use LEARNED improvement threshold
+        # Stop if improvement threshold not met
         if best_candidate is not None and best_improvement > greedy_improvement_thresh:
             selected.append(best_candidate)
             remaining.remove(best_candidate)
@@ -1073,7 +1036,7 @@ def compute_ensemble_expected_utility(feature_indices: List[int],
 
 
 def select_features_bayesian(belief_state: BeliefState,
-                              method: str = 'expected_sharpe',
+                              method: str = 'expected_ir',
                               mc_passing_features: Optional[np.ndarray] = None) -> Tuple[List[int], int]:
     """
     Select features using LEARNED hyperparameters.
@@ -1090,7 +1053,7 @@ def select_features_bayesian(belief_state: BeliefState,
     if method == 'greedy_bayesian':
         return select_features_greedy_bayesian(belief_state, candidate_mask)
 
-    # Get LEARNED probability threshold
+    # Get learned probability threshold
     min_prob_positive = belief_state.get_prob_threshold()
 
     scores = belief_state.get_feature_scores(method)
@@ -1130,9 +1093,9 @@ def get_mc_passing_features(belief_state: BeliefState, data: dict,
 
     mc_idx = n_to_idx[n_satellites]
     mc_hitrates = mc_data['mc_hitrates'][mc_idx]
-    # PHASE 4: Use Sharpe data instead of alpha data
-    mc_sharpe_mean = mc_data['mc_sharpe_mean'][mc_idx]  # PHASE 4: Changed key
-    mc_sharpe_std = mc_data['mc_sharpe_std'][mc_idx]    # PHASE 4: Changed key
+    # Load IR statistics from MC
+    mc_ir_mean = mc_data['mc_ir_mean'][mc_idx]
+    mc_ir_std = mc_data['mc_ir_std'][mc_idx]
     mc_candidate_mask = mc_data['candidate_masks'][mc_idx]
 
     mc_config = mc_data.get('config', None)
@@ -1150,20 +1113,18 @@ def get_mc_passing_features(belief_state: BeliefState, data: dict,
 
     date_candidates = mc_candidate_mask[test_idx]
     date_hr_values = mc_hitrates[test_idx, date_candidates]
-    # PHASE 4: Use Sharpe values instead of alpha values for filtering
-    date_sharpe_values = mc_sharpe_mean[test_idx, date_candidates]  # PHASE 4: Changed
+    date_ir_values = mc_ir_mean[test_idx, date_candidates]
 
     valid_hr = date_hr_values[~np.isnan(date_hr_values)]
-    valid_sharpe = date_sharpe_values[~np.isnan(date_sharpe_values)]  # PHASE 4: Changed
+    valid_ir = date_ir_values[~np.isnan(date_ir_values)]
 
-    if len(valid_hr) == 0 or len(valid_sharpe) == 0:  # PHASE 4: Changed
+    if len(valid_hr) == 0 or len(valid_ir) == 0:
         return None, 0
 
     baseline_hr = np.mean(valid_hr)
-    # PHASE 4: Use Sharpe instead of alpha for baseline
-    baseline_sharpe = np.mean(valid_sharpe)  # PHASE 4: Changed
+    baseline_ir = np.mean(valid_ir)
 
-    # Use LEARNED confidence level
+    # Get learned confidence level for feature filtering
     mc_confidence = belief_state.get_mc_confidence()
     t_crit = stats.t.ppf(mc_confidence, df=max(1, mc_n_samples - 1))
 
@@ -1172,23 +1133,20 @@ def get_mc_passing_features(belief_state: BeliefState, data: dict,
             continue
 
         hr = mc_hitrates[test_idx, feat_idx]
-        # PHASE 4: Use Sharpe values instead of alpha values
-        sharpe_mu = mc_sharpe_mean[test_idx, feat_idx]  # PHASE 4: Changed
-        sharpe_std = mc_sharpe_std[test_idx, feat_idx]  # PHASE 4: Changed
+        ir_mu = mc_ir_mean[test_idx, feat_idx]
+        ir_std = mc_ir_std[test_idx, feat_idx]
 
-        if np.isnan(hr) or np.isnan(sharpe_mu):  # PHASE 4: Changed
+        if np.isnan(hr) or np.isnan(ir_mu):
             continue
 
         hr_se = np.sqrt(hr * (1 - hr) / mc_n_samples) if 0 < hr < 1 else 0
-        # PHASE 4: Use Sharpe std instead of alpha std
-        sharpe_se = sharpe_std / np.sqrt(mc_n_samples) if sharpe_std > 0 else 0  # PHASE 4: Changed
+        ir_se = ir_std / np.sqrt(mc_n_samples) if ir_std > 0 else 0
 
         hr_ci_lower = hr - t_crit * hr_se
-        # PHASE 4: Use Sharpe confidence interval instead of alpha
-        sharpe_ci_lower = sharpe_mu - t_crit * sharpe_se  # PHASE 4: Changed
+        ir_ci_lower = ir_mu - t_crit * ir_se
 
-        # PHASE 4: Compare Sharpe to baseline Sharpe
-        if hr_ci_lower > baseline_hr or sharpe_ci_lower > baseline_sharpe:  # PHASE 4: Changed
+        # Feature passes if either hit rate or IR significantly exceeds baseline
+        if hr_ci_lower > baseline_hr or ir_ci_lower > baseline_ir:
             passing_mask[feat_idx] = True
 
     return passing_mask, int(passing_mask.sum())
@@ -1232,7 +1190,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
     # Persist ALL hyperparameter beliefs across months
     persistent_decay_belief = None
     persistent_prior_strength_belief = None
-    # PHASE 4 REMOVED: persistent_alpha_weight_belief = None
     persistent_prob_threshold_belief = None
     persistent_mc_confidence_belief = None
     persistent_greedy_threshold_belief = None
@@ -1261,11 +1218,10 @@ def walk_forward_backtest(data: dict, n_satellites: int,
         if months_since_reopt >= REOPTIMIZATION_FREQUENCY:
             belief_state = BeliefState(n_features, feature_names)
 
-            # Restore ALL persistent hyperparameter beliefs
+            # Restore persistent hyperparameter beliefs
             if persistent_decay_belief is not None:
                 belief_state.decay_belief = persistent_decay_belief
                 belief_state.prior_strength_belief = persistent_prior_strength_belief
-                # PHASE 4 REMOVED: belief_state.alpha_weight_belief = persistent_alpha_weight_belief
                 belief_state.prob_threshold_belief = persistent_prob_threshold_belief
                 belief_state.mc_confidence_belief = persistent_mc_confidence_belief
                 belief_state.greedy_threshold_belief = persistent_greedy_threshold_belief
@@ -1273,10 +1229,9 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             initialize_beliefs_from_mc(belief_state, data, n_satellites, test_idx)
             update_beliefs_from_history(belief_state, data, n_satellites, test_idx)
 
-            # Save ALL updated hyperparameter beliefs
+            # Save updated hyperparameter beliefs
             persistent_decay_belief = belief_state.decay_belief
             persistent_prior_strength_belief = belief_state.prior_strength_belief
-            # PHASE 4 REMOVED: persistent_alpha_weight_belief = belief_state.alpha_weight_belief
             persistent_prob_threshold_belief = belief_state.prob_threshold_belief
             persistent_mc_confidence_belief = belief_state.mc_confidence_belief
             persistent_greedy_threshold_belief = belief_state.greedy_threshold_belief
@@ -1300,7 +1255,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             continue
 
         feature_scores = np.array([
-            belief_state.beliefs[f].expected_sharpe()
+            belief_state.beliefs[f].expected_ir()
             for f in selected_features
         ])
 
@@ -1328,11 +1283,10 @@ def walk_forward_backtest(data: dict, n_satellites: int,
 
         avg_alpha = np.mean(alphas)
 
-        # Get ALL current hyperparameters
+        # Get current hyperparameters
         current_decay = belief_state.get_decay()
         current_prior_strength = belief_state.get_prior_strength()
-        # PHASE 4 REMOVED: current_alpha_weight = belief_state.get_alpha_weight()
-        current_alpha_weight = 1.0  # PHASE 4: Placeholder for backward compatibility
+        current_alpha_weight = belief_state.get_alpha_weight()  # Always 1.0 (pure IR)
         current_prob_threshold = belief_state.get_prob_threshold()
         current_mc_confidence = belief_state.get_mc_confidence()
         current_greedy_threshold = belief_state.get_greedy_threshold()
@@ -1346,7 +1300,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'n_mc_passing': n_mc_passing,
             'learned_decay': current_decay,
             'learned_prior_strength': current_prior_strength,
-            'learned_alpha_weight': current_alpha_weight,  # PHASE 4: Kept for backward compatibility (value=1.0)
+            'learned_alpha_weight': current_alpha_weight,
             'learned_prob_threshold': current_prob_threshold,
             'learned_mc_confidence': current_mc_confidence,
             'learned_greedy_threshold': current_greedy_threshold,
@@ -1358,7 +1312,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'date': test_date,
             'decay': current_decay,
             'prior_strength': current_prior_strength,
-            'alpha_weight': current_alpha_weight,  # PHASE 4: Always 1.0 (no blending)
+            'alpha_weight': current_alpha_weight,
             'prob_threshold': current_prob_threshold,
             'mc_confidence': current_mc_confidence,
             'greedy_threshold': current_greedy_threshold,
@@ -1403,7 +1357,7 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
     avg_alpha = results_df['avg_alpha'].mean()
     std_alpha = results_df['avg_alpha'].std()
     hit_rate = (results_df['avg_alpha'] > 0).mean()
-    sharpe = avg_alpha / std_alpha if std_alpha > 0 else 0
+    information_ratio = avg_alpha / std_alpha if std_alpha > 0 else 0
 
     results_df = results_df.copy()
     results_df['cumulative'] = (1 + results_df['avg_alpha']).cumprod() - 1
@@ -1414,9 +1368,9 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
     final_decay = results_df['learned_decay'].iloc[-1]
     avg_prior_strength = results_df['learned_prior_strength'].mean()
     final_prior_strength = results_df['learned_prior_strength'].iloc[-1]
-    # PHASE 4: alpha_weight always 1.0 (pure Sharpe optimization, no blending)
-    avg_alpha_weight = results_df['learned_alpha_weight'].mean()  # Will be 1.0
-    final_alpha_weight = results_df['learned_alpha_weight'].iloc[-1]  # Will be 1.0
+    # alpha_weight always 1.0 (pure IR optimization)
+    avg_alpha_weight = results_df['learned_alpha_weight'].mean()
+    final_alpha_weight = results_df['learned_alpha_weight'].iloc[-1]
     avg_prob_threshold = results_df['learned_prob_threshold'].mean()
     final_prob_threshold = results_df['learned_prob_threshold'].iloc[-1]
     avg_mc_confidence = results_df['learned_mc_confidence'].mean()
@@ -1431,14 +1385,14 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
         'std_alpha': std_alpha,
         'annual_alpha': avg_alpha * 12,
         'hit_rate': hit_rate,
-        'sharpe': sharpe,
+        'information_ratio': information_ratio,
         'total_return': total_return,
         'avg_decay': avg_decay,
         'final_decay': final_decay,
         'avg_prior_strength': avg_prior_strength,
         'final_prior_strength': final_prior_strength,
-        'avg_alpha_weight': avg_alpha_weight,  # PHASE 4: Always 1.0
-        'final_alpha_weight': final_alpha_weight,  # PHASE 4: Always 1.0
+        'avg_alpha_weight': avg_alpha_weight,
+        'final_alpha_weight': final_alpha_weight,
         'avg_prob_threshold': avg_prob_threshold,
         'final_prob_threshold': final_prob_threshold,
         'avg_mc_confidence': avg_mc_confidence,
@@ -1488,10 +1442,10 @@ def main():
     print(f"\nConfiguration:")
     print(f"  Holding period: {HOLDING_MONTHS} month")
     print(f"  N values to test: {N_SATELLITES_TO_TEST}")
-    print(f"\nLearned Hyperparameters (5 total - PHASE 4: removed alpha_weight):")
+    print(f"\nLearned Hyperparameters (5 total - removed alpha_weight):")
     print(f"  1. Decay Rate: Beta({DECAY_PRIOR_ALPHA}, {DECAY_PRIOR_BETA}) -> [{DECAY_MIN}, {DECAY_MAX}]")
     print(f"  2. Prior Strength: Gamma({PRIOR_STRENGTH_SHAPE}, {PRIOR_STRENGTH_SCALE}) -> [{PRIOR_STRENGTH_MIN}, {PRIOR_STRENGTH_MAX}]")
-    print(f"  3. [PHASE 4 REMOVED] Alpha Weight - Pure Sharpe optimization (no blending)")
+    print(f"  3. [REMOVED] Alpha Weight - Pure IR optimization (no blending)")
     print(f"  4. Prob Threshold: Beta({PROB_THRESH_PRIOR_ALPHA}, {PROB_THRESH_PRIOR_BETA}) -> [{PROB_THRESH_MIN}, {PROB_THRESH_MAX}]")
     print(f"  5. MC Confidence: Beta({MC_CONF_PRIOR_ALPHA}, {MC_CONF_PRIOR_BETA}) -> [{MC_CONF_MIN}, {MC_CONF_MAX}]")
     print(f"  6. Greedy Threshold: Gamma({GREEDY_THRESH_SHAPE}, {GREEDY_THRESH_SCALE}) -> [{GREEDY_THRESH_MIN}, {GREEDY_THRESH_MAX}]")
@@ -1529,7 +1483,7 @@ def main():
                 print(f"    Monthly Alpha: {stats['avg_alpha']*100:.2f}%")
                 print(f"    Annual Alpha: {stats['annual_alpha']*100:.1f}%")
                 print(f"    Hit Rate: {stats['hit_rate']:.2%}")
-                print(f"    Sharpe: {stats['sharpe']:.3f}")
+                print(f"    Information Ratio: {stats['information_ratio']:.3f}")
                 print(f"\n  Learned Hyperparameters (final):")
                 print(f"    Decay: {stats['final_decay']:.4f}")
                 print(f"    Prior Strength: {stats['final_prior_strength']:.1f}")
@@ -1558,24 +1512,24 @@ def main():
 
         print("\n" + "-" * 140)
         print(f"{'N':>3} {'Periods':>8} {'Monthly':>10} {'Annual':>10} {'Hit Rate':>10} "
-              f"{'Sharpe':>8} {'Decay':>7} {'Prior':>7} {'AlphaW':>7} {'ProbT':>7} {'MCConf':>7} {'GreedyT':>9}")
+              f"{'IR':>8} {'Decay':>7} {'Prior':>7} {'AlphaW':>7} {'ProbT':>7} {'MCConf':>7} {'GreedyT':>9}")
         print("-" * 140)
 
         for _, row in summary_df.sort_values('n_satellites').iterrows():
             print(f"{int(row['n_satellites']):>3} {int(row['n_periods']):>8} "
                   f"{row['avg_alpha']*100:>9.2f}% {row['annual_alpha']*100:>9.1f}% "
-                  f"{row['hit_rate']:>9.1%} {row['sharpe']:>8.3f} "
+                  f"{row['hit_rate']:>9.1%} {row['information_ratio']:>8.3f} "
                   f"{row['final_decay']:>7.3f} {row['final_prior_strength']:>7.1f} "
                   f"{row['final_alpha_weight']:>7.2f} {row['final_prob_threshold']:>7.2f} "
                   f"{row['final_mc_confidence']:>7.2f} {row['final_greedy_threshold']:>9.5f}")
 
         print("-" * 140)
 
-        # Best by Sharpe
-        best_idx = summary_df['sharpe'].idxmax()
+        # Best by Information Ratio
+        best_idx = summary_df['information_ratio'].idxmax()
         best = summary_df.loc[best_idx]
-        print(f"\nBest by Sharpe: N={int(best['n_satellites'])}")
-        print(f"  Sharpe: {best['sharpe']:.3f}")
+        print(f"\nBest by Information Ratio: N={int(best['n_satellites'])}")
+        print(f"  Information Ratio: {best['information_ratio']:.3f}")
         print(f"  Hit Rate: {best['hit_rate']:.1%}")
         print(f"  Annual Alpha: {best['annual_alpha']*100:.1f}%")
         print(f"  Learned (final): Decay={best['final_decay']:.3f}, Prior={best['final_prior_strength']:.1f}, "

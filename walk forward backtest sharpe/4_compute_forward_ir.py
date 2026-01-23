@@ -1,46 +1,32 @@
 """
-Step 4 (SHARPE OPTIMIZATION): Compute Forward Alpha and Rankings Matrix - Z-SCORE RANKING
-===========================================================================================
+Phase 1: Compute Forward Alpha and Information Ratio
+=====================================================
 
-PHASE 1 OF SHARPE OPTIMIZATION PROJECT:
-- Implements z-score normalization for signal ranking (volatility-adjusted)
-- Uses ALL available filtered signals and raw signals (7,618 total)
-- Ranks features by z-score instead of raw percentile value
+INFORMATION RATIO OPTIMIZATION PROJECT - Step 4
 
-Key Change:
-    OLD: group['rank'] = group['value'].rank(pct=True)
-         → Ranked by raw signal magnitude only
+Computes walk-forward data for IR-based backtesting:
 
-    NEW: group['zscore'] = (group['value'] - mean) / std
-         group['rank'] = group['zscore'].rank(pct=True)
-         → Ranked by volatility-adjusted signal (more Sharpe-aware)
-
-This script computes the data needed for walk-forward backtesting:
-1. Forward alpha for all ETFs at monthly intervals
-2. Rankings matrix (cross-sectional z-score ranks for ALL 7,618 features)
-
-IMPORTANT: This script does NOT do feature selection or ensemble search.
-That happens in the backtest script, using only past data at each test date.
+1. **Forward Alpha**: ETF return - Benchmark return for each month
+2. **Forward IR**: forward_alpha / realized_volatility_during_that_month
+   - Realized volatility = std(daily alphas) within the month
+   - True IR metric that consolidates alpha, consistency, and risk
+3. **Rankings Matrix**: Z-score normalized feature signals
+   - Cross-sectional z-score ranking (volatility-adjusted)
+   - 7,618 features total (filtered + raw)
+   - Used by Phase 2-4 to evaluate feature quality
 
 Output:
-    walk forward backtest sharpe/data/forward_alpha_{N}month.parquet
-    walk forward backtest sharpe/data/rankings_matrix_sharpe_{N}month.npz
+    data/forward_alpha_1month.parquet         # Contains forward_alpha, forward_ir, forward_return, core_return
+    data/rankings_matrix_ir_1month.npz        # 3D matrix: (dates, isins, features)
 
 Usage:
-    python 4_compute_forward_alpha_sharpe.py [horizons]
-
-Examples:
-    python 4_compute_forward_alpha_sharpe.py              # Default: 1 month horizon
-    python 4_compute_forward_alpha_sharpe.py 3            # Single: 3 month horizon
-    python 4_compute_forward_alpha_sharpe.py 1,2,3,4,5,6  # Multiple horizons
-    python 4_compute_forward_alpha_sharpe.py 1-6          # Range: 1 to 6 months
+    python 4_compute_forward_ir.py
 """
 
 import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from tqdm import tqdm
 from multiprocessing import Pool, cpu_count
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -63,10 +49,7 @@ from support.signal_database import SignalDatabase
 # Core ETF (benchmark)
 CORE_ISIN = 'IE00B4L5Y983'  # iShares Core MSCI World
 
-# Horizon configuration
-# Testing showed: multi-month horizons (2-12) and daily confirmations (5d, 10d, 15d)
-# provided NO statistically significant improvement over single 1-month horizon.
-# Keeping only 1-month for simplicity and computation speed.
+# Holding period (in months) - 1-month horizon is optimal
 HOLDING_MONTHS = 1
 
 # Minimum price history required (1 year)
@@ -78,12 +61,7 @@ N_CORES = max(1, cpu_count() - 1)
 # Number of threads for I/O operations
 N_THREADS = min(32, cpu_count() * 4)
 
-# Feature pre-filtering (for rankings matrix)
-# SET TO None TO DISABLE FILTERING AND USE ALL FEATURES
-TOP_N_FILTERED_FEATURES = None  # Top filtered features by momentum alpha (None = ALL)
-TOP_N_RAW_SIGNALS = None        # Top raw signals (None = ALL)
-
-# Force recompute flags
+# Force recompute (set to True to regenerate files)
 FORCE_RECOMPUTE = False
 
 # Output directory (relative to this script's location)
@@ -94,7 +72,7 @@ SIGNAL_DIR = Path(__file__).parent / 'data' / 'signals'
 
 
 # ============================================================
-# STEP 1: COMPUTE FORWARD ALPHA (OPTIMIZED)
+# PHASE 1A: COMPUTE FORWARD ALPHA AND INFORMATION RATIO
 # ============================================================
 
 def get_monthly_dates(start_date=None, end_date=None):
@@ -150,20 +128,13 @@ def load_single_etf(args):
 
 
 def parse_horizon(horizon):
-    """
-    Parse horizon specification into (value, unit) tuple.
-
-    Examples:
-        1 -> (1, 'month')
-        '5d' -> (5, 'days')
-        '10d' -> (10, 'days')
-    """
+    """Parse horizon specification into (value, unit) tuple."""
     if isinstance(horizon, int):
         return (horizon, 'month')
     elif isinstance(horizon, str) and horizon.endswith('d'):
         return (int(horizon[:-1]), 'days')
     else:
-        raise ValueError(f"Invalid horizon format: {horizon}. Use int for months or '5d' for days.")
+        raise ValueError(f"Invalid horizon format: {horizon}. Use int for months only.")
 
 
 def get_horizon_label(horizon):
@@ -177,19 +148,19 @@ def get_horizon_label(horizon):
 
 def compute_forward_alpha(horizon):
     """
-    Compute forward alpha for all ETFs at monthly intervals.
+    Compute forward alpha and forward IR (Information Ratio) for all ETFs.
 
-    Args:
-        horizon: Either an integer (months) or string like '5d' (trading days)
+    Returns both:
+    - forward_alpha: ETF return - Benchmark return
+    - forward_ir: forward_alpha / realized_volatility_during_that_month
 
-    OPTIMIZED: Uses vectorized operations instead of nested Python loops.
-    ~10-50x faster than the original implementation.
+    Uses vectorized operations for efficiency.
     """
     horizon_value, horizon_unit = parse_horizon(horizon)
     horizon_label = get_horizon_label(horizon)
 
     print(f"\n{'='*60}")
-    print(f"STEP 1: COMPUTE FORWARD ALPHA ({horizon_label.upper()} HORIZON)")
+    print(f"PHASE 1A: COMPUTE FORWARD ALPHA & IR ({horizon_label.upper()} HORIZON)")
     print(f"{'='*60}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -254,12 +225,8 @@ def compute_forward_alpha(horizon):
     print(f"  Price matrix: {price_df.shape[0]} days × {price_df.shape[1]} ETFs")
     print(f"  Date range: {price_df.index[0].date()} to {price_df.index[-1].date()}")
 
-    # Find actual trading dates for each monthly date using searchsorted
-    # searchsorted finds where each monthly_date would be inserted to maintain order
-    # We want the first trading date >= monthly_date
+    # Map monthly test dates to actual trading dates
     print(f"\nMapping monthly dates to trading dates...")
-
-    # Original simple logic for monthly horizons (restored from daa303b)
     start_indices = np.searchsorted(trading_dates, monthly_dates_arr[:-horizon_value])
     end_indices = np.searchsorted(trading_dates, monthly_dates_arr[horizon_value:])
 
@@ -285,12 +252,62 @@ def compute_forward_alpha(horizon):
     with np.errstate(divide='ignore', invalid='ignore'):
         returns = (end_prices / start_prices) - 1  # (n_periods, n_etfs)
 
+    n_etfs = returns.shape[1]
+
     # Get core returns
     core_col_idx = price_df.columns.get_loc(CORE_ISIN)
     core_returns = returns[:, core_col_idx]  # (n_periods,)
 
     # Compute alpha: ETF return - core return
     alpha = returns - core_returns[:, np.newaxis]  # Broadcasting
+
+    # Compute realized (forward) volatility per ISIN for each month
+    # This is the actual volatility realized DURING that month
+    # True forward IR = forward_alpha / realized_volatility_during_that_month
+    print(f"\nComputing realized volatility per ISIN for each month...")
+
+    forward_volatility = np.full((n_periods, n_etfs), np.nan, dtype=np.float32)
+
+    for period in range(n_periods):
+        # Get date range for this period
+        period_start_date = start_dates[period]
+        period_end_date = end_dates[period]
+
+        # Find all daily dates within this month's period
+        mask = (price_df.index >= period_start_date) & (price_df.index <= period_end_date)
+        daily_dates_in_period = price_df.index[mask]
+
+        if len(daily_dates_in_period) >= 5:  # Need at least 5 trading days in the month
+            # Get start and end indices for this period in the full daily price data
+            start_idx = price_df.index.get_loc(daily_dates_in_period[0])
+            end_idx = price_df.index.get_loc(daily_dates_in_period[-1])
+
+            # Compute daily returns within this period
+            daily_period_prices = price_df.iloc[start_idx:end_idx + 1].values  # (n_days, n_etfs)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                daily_period_returns = (daily_period_prices[1:] / daily_period_prices[:-1]) - 1
+
+            # Get benchmark returns for this period
+            benchmark_col = price_df.columns.get_loc(CORE_ISIN)
+            daily_benchmark_returns = daily_period_returns[:, benchmark_col]
+
+            # Compute daily alphas within this period
+            daily_period_alphas = daily_period_returns - daily_benchmark_returns[:, np.newaxis]
+
+            # Realized volatility = std of daily alphas during the month
+            forward_volatility[period, :] = np.std(daily_period_alphas, axis=0)
+
+    # Floor to avoid division by zero
+    forward_volatility = np.maximum(forward_volatility, 1e-8)
+    forward_volatility = np.nan_to_num(forward_volatility, nan=1e-8)
+
+    print(f"  Mean realized volatility: {np.nanmean(forward_volatility):.6f}")
+    print(f"  Min: {np.nanmin(forward_volatility):.6f}, Max: {np.nanmax(forward_volatility):.6f}")
+
+    # Compute true forward IR: forward_alpha / realized_volatility_during_that_month
+    # This is the actual Information Ratio achieved in that month
+    with np.errstate(divide='ignore', invalid='ignore'):
+        forward_ir = alpha / forward_volatility  # Element-wise division (n_periods, n_etfs)
 
     # Check history requirement (vectorized)
     # For each ETF, find first valid date
@@ -312,14 +329,10 @@ def compute_forward_alpha(horizon):
     isins = price_df.columns.tolist()
     n_etfs = len(isins)
 
-    # Create meshgrid of indices
-    period_idx, etf_idx = np.meshgrid(np.arange(n_periods), np.arange(n_etfs), indexing='ij')
-    period_idx = period_idx.flatten()
-    etf_idx = etf_idx.flatten()
-
     # Flatten arrays
     flat_returns = returns.flatten()
     flat_alpha = alpha.flatten()
+    flat_ir = forward_ir.flatten()
     flat_core_returns = np.repeat(core_returns, n_etfs)
 
     # Create date and isin arrays
@@ -342,24 +355,27 @@ def compute_forward_alpha(horizon):
         'isin': np.array(flat_isins)[valid],
         'forward_return': flat_returns[valid],
         'core_return': flat_core_returns[valid],
-        'forward_alpha': flat_alpha[valid]
+        'forward_alpha': flat_alpha[valid],
+        'forward_ir': flat_ir[valid]
     })
 
     # Save
     alpha_df.to_parquet(alpha_file, index=False)
 
-    print(f"\n{horizon_label} forward alpha:")
+    print(f"\n{horizon_label} forward alpha and IR:")
     print(f"  Observations: {len(alpha_df):,}")
     print(f"  Dates: {alpha_df['date'].nunique()}")
     print(f"  ISINs: {alpha_df['isin'].nunique()}")
     print(f"  Mean alpha: {alpha_df['forward_alpha'].mean():.4f}")
+    print(f"  Mean IR: {alpha_df['forward_ir'].mean():.4f}")
+    print(f"  IR range: {alpha_df['forward_ir'].min():.4f} to {alpha_df['forward_ir'].max():.4f}")
     print(f"\n[SAVED] {alpha_file}")
 
     return alpha_df
 
 
 # ============================================================
-# STEP 2: CREATE RANKINGS MATRIX (OPTIMIZED)
+# PHASE 1B: CREATE RANKINGS MATRIX (Z-SCORE NORMALIZED)
 # ============================================================
 
 def process_single_feature(args):
@@ -491,10 +507,10 @@ def create_rankings_matrix(alpha_df, horizon):
     horizon_label = get_horizon_label(horizon)
 
     print(f"\n{'='*60}")
-    print(f"STEP 2: CREATE RANKINGS MATRIX")
+    print(f"PHASE 1B: CREATE RANKINGS MATRIX")
     print(f"{'='*60}")
 
-    matrix_file = OUTPUT_DIR / f'rankings_matrix_sharpe_{horizon_label}.npz'
+    matrix_file = OUTPUT_DIR / f'rankings_matrix_ir_{horizon_label}.npz'
 
     if matrix_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[LOADING] Pre-computed rankings matrix from {matrix_file}")
@@ -515,45 +531,30 @@ def create_rankings_matrix(alpha_df, horizon):
     feature_metrics = load_feature_metrics(1)  # Always use 1-month for feature selection
 
     if feature_metrics is None:
-        # Fall back to loading all signals
+        # Load all signals from database
         db = SignalDatabase(SIGNAL_DIR)
-        # Sort for deterministic ordering (set iteration order is non-deterministic)
         filtered_signals = sorted(db.get_completed_filtered_signals())
-        raw_signals = db.get_available_signals()  # Already sorted in signal_database.py
-
-        # Create minimal dataframes
-        # If TOP_N_* is None, use all signals; otherwise slice to top N
-        filtered_list = filtered_signals if TOP_N_FILTERED_FEATURES is None else filtered_signals[:TOP_N_FILTERED_FEATURES]
-        raw_list = raw_signals if TOP_N_RAW_SIGNALS is None else raw_signals[:TOP_N_RAW_SIGNALS]
+        raw_signals = db.get_available_signals()
 
         filtered_features = pd.DataFrame({
-            'feature_name': filtered_list,
+            'feature_name': filtered_signals,
             'feature_type': 'filtered'
         })
         raw_signals_df = pd.DataFrame({
-            'feature_name': raw_list,
+            'feature_name': raw_signals,
             'feature_type': 'raw'
         })
     else:
-        # Use pre-computed metrics to select top features (or all if TOP_N is None)
+        # Use all features from pre-computed metrics
         df_filtered = feature_metrics[feature_metrics['feature_type'] == 'filtered'].copy()
         df_raw = feature_metrics[feature_metrics['feature_type'] == 'raw'].copy()
-
-        # If TOP_N_* is None, use all features; otherwise select top N by momentum_alpha
-        if TOP_N_FILTERED_FEATURES is None:
-            filtered_features = df_filtered
-        else:
-            filtered_features = df_filtered.nlargest(TOP_N_FILTERED_FEATURES, 'momentum_alpha')
-
-        if TOP_N_RAW_SIGNALS is None:
-            raw_signals_df = df_raw
-        else:
-            raw_signals_df = df_raw.nlargest(TOP_N_RAW_SIGNALS, 'momentum_alpha')
+        filtered_features = df_filtered
+        raw_signals_df = df_raw
 
     print(f"\nSelected {len(filtered_features)} filtered features")
     print(f"Selected {len(raw_signals_df)} raw signals")
 
-    # Get dimensions - these are the TARGET dates (monthly trading dates)
+    # Get dimensions - target dates are the monthly test dates
     target_dates = sorted(alpha_df['date'].unique())
     target_dates_arr = np.array(target_dates, dtype='datetime64[ns]')
     dates = target_dates
@@ -667,121 +668,34 @@ def create_rankings_matrix(alpha_df, horizon):
 # MAIN
 # ============================================================
 
-def parse_horizons(arg_string):
-    """
-    Parse horizon argument string into list of horizons.
-
-    Supports:
-        - Single month value: "3" -> [3]
-        - Comma-separated months: "1,2,3" -> [1,2,3]
-        - Range of months: "1-6" -> [1,2,3,4,5,6]
-        - Daily horizons: "5d,10d,15d" -> ['5d','10d','15d']
-        - Combined: "1,5d,10d" -> [1,'5d','10d']
-    """
-    horizons = []
-    parts = arg_string.split(',')
-
-    for part in parts:
-        part = part.strip()
-        if part.endswith('d'):
-            # Daily horizon
-            horizons.append(part)
-        elif '-' in part and not part.startswith('-'):
-            # Range notation (only for months)
-            start, end = part.split('-')
-            horizons.extend(range(int(start), int(end) + 1))
-        else:
-            horizons.append(int(part))
-
-    return horizons  # Keep order as specified
-
-
 def main(horizon=HOLDING_MONTHS):
-    """Run the forward alpha and rankings matrix computation for a single horizon."""
+    """Run Phase 1: Compute forward alpha, IR, and rankings matrix."""
     horizon_label = get_horizon_label(horizon)
 
     print("=" * 60)
-    print(f"WALK-FORWARD DATA PREPARATION - {horizon_label.upper()} HORIZON")
+    print(f"PHASE 1: WALK-FORWARD DATA PREPARATION ({horizon_label.upper()})")
     print("=" * 60)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Step 1: Compute forward alpha
+    # Phase 1A: Compute forward alpha and IR
     alpha_df = compute_forward_alpha(horizon)
 
-    # Step 2: Create rankings matrix
+    # Phase 1B: Create rankings matrix
     rankings_data = create_rankings_matrix(alpha_df, horizon)
 
     print("\n" + "=" * 60)
-    print("DATA PREPARATION COMPLETE")
+    print("PHASE 1 COMPLETE")
     print("=" * 60)
     print(f"\nOutputs saved to: {OUTPUT_DIR}/")
-    print(f"  forward_alpha_{horizon_label}.parquet")
-    print(f"  rankings_matrix_{horizon_label}.npz")
+    print(f"  • forward_alpha_{horizon_label}.parquet")
+    print(f"    Columns: date, isin, forward_return, core_return, forward_alpha, forward_ir")
+    print(f"  • rankings_matrix_ir_{horizon_label}.npz")
+    print(f"    3D matrix: ({len(rankings_data['dates'])} dates × {len(rankings_data['isins'])} ISINs × {len(rankings_data['features'])} features)")
+    print(f"\nNext step: Run Phase 2 - 5_precompute_feature_ir.py")
 
     return alpha_df, rankings_data
 
 
-def main_multi_horizon(horizons):
-    """Run the forward alpha and rankings matrix computation for multiple horizons."""
-    import time
-
-    print("=" * 60)
-    print(f"WALK-FORWARD DATA PREPARATION - MULTI-HORIZON")
-    print("=" * 60)
-    print(f"\nHorizons to compute: {horizons}")
-    print(f"Total: {len(horizons)} horizons")
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    total_start = time.time()
-    results = {}
-
-    for i, horizon in enumerate(horizons, 1):
-        horizon_label = get_horizon_label(horizon)
-
-        print(f"\n{'#' * 60}")
-        print(f"# HORIZON {i}/{len(horizons)}: {horizon_label.upper()}")
-        print(f"{'#' * 60}")
-
-        horizon_start = time.time()
-
-        # Step 1: Compute forward alpha
-        alpha_df = compute_forward_alpha(horizon)
-
-        # Step 2: Create rankings matrix
-        rankings_data = create_rankings_matrix(alpha_df, horizon)
-
-        horizon_time = time.time() - horizon_start
-        print(f"\n[DONE] {horizon_label} horizon completed in {horizon_time:.1f}s")
-
-        results[horizon] = {
-            'alpha_df': alpha_df,
-            'rankings_data': rankings_data
-        }
-
-    total_time = time.time() - total_start
-
-    print("\n" + "=" * 60)
-    print("MULTI-HORIZON DATA PREPARATION COMPLETE")
-    print("=" * 60)
-    print(f"\nTotal time: {total_time:.1f}s ({total_time/60:.1f} min)")
-    print(f"\nOutputs saved to: {OUTPUT_DIR}/")
-    for h in horizons:
-        label = get_horizon_label(h)
-        print(f"  forward_alpha_{label}.parquet, rankings_matrix_{label}.npz")
-    print("\nNext step: Run 5_precompute_feature_alpha.py with same horizons")
-    horizon_str = ','.join(str(h) for h in horizons)
-    print(f"           python 5_precompute_feature_alpha.py {horizon_str}")
-
-    return results
-
-
 if __name__ == '__main__':
-    # Single horizon only (multi-horizon showed no benefit)
-    if len(sys.argv) > 1:
-        horizon = int(sys.argv[1])
-    else:
-        horizon = HOLDING_MONTHS
-
-    main(horizon)
+    main(HOLDING_MONTHS)
