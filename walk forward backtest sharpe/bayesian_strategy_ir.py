@@ -100,16 +100,11 @@ PRIOR_STRENGTH_MAX = 200.0
 HP_UPDATE_WEIGHT = 1.0
 PREDICTION_SUCCESS_THRESHOLD = 1.0
 
-# Feature selection parameters (defaults, will be overridden by learned values)
+# Feature selection parameters
 MAX_ENSEMBLE_SIZE = 10
-DEFAULT_MIN_PROBABILITY_POSITIVE = 0.55
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
 DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD = 0.001
-
-# MC pre-filter (default, will be overridden by learned value)
-USE_MC_PREFILTER = False
-DEFAULT_MC_CONFIDENCE_LEVEL = 0.90
 
 # Enhanced priors
 USE_HITRATE_IN_PRIOR = True
@@ -272,7 +267,7 @@ class BeliefState:
         for i in range(n_features):
             self.beliefs[i] = FeatureBelief()
 
-        # Hyperparameter beliefs
+        # Hyperparameter beliefs (2 learned parameters)
         self.decay_belief = DecayBelief()
         self.prior_strength_belief = PriorStrengthBelief()
 
@@ -311,7 +306,7 @@ class BeliefState:
         belief.sum_sq = (ir_std**2 + ir_mean**2) * prior_strength
 
     def update(self, feat_idx: int, observed_alpha: float, weight: float = 1.0):
-        """Update feature belief and original hyperparameter beliefs."""
+        """Update feature belief and all hyperparameter beliefs."""
         belief = self.beliefs[feat_idx]
 
         current_decay = self.get_decay()
@@ -348,7 +343,7 @@ class BeliefState:
             else:
                 belief.sigma = belief.prior_sigma
 
-        # Update hyperparameter beliefs
+        # Update hyperparameter beliefs (2 learned hyperparameters)
         self.decay_belief.update(posterior_predicted, observed_alpha, prediction_std)
         self.prior_strength_belief.update(prior_predicted, observed_alpha, prediction_std)
 
@@ -660,24 +655,31 @@ def update_beliefs_from_history(belief_state: BeliefState, data: dict,
 def select_features_greedy_bayesian(belief_state: BeliefState,
                                      candidate_mask: np.ndarray) -> Tuple[List[int], int]:
     """
-    Greedy ensemble building with LEARNED hyperparameters.
+    Greedy ensemble building with PURE IR selection.
+
+    Uses learned hyperparameters to build ensemble:
+    1. Start with highest expected IR feature
+    2. Greedily add next feature that improves ensemble utility most
+    3. Stop when improvement < threshold or MAX_ENSEMBLE_SIZE reached
+
+    Args:
+        belief_state: Bayesian beliefs about features (mu, sigma for each)
+        candidate_mask: Boolean mask of valid candidates
 
     Returns: (selected_features, ensemble_size)
     """
     n_features = belief_state.n_features
 
-    # Use fixed thresholds (removed learned hyperparameters)
-    min_prob_positive = DEFAULT_MIN_PROBABILITY_POSITIVE
+    # Use greedy improvement threshold
     greedy_improvement_thresh = DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD
 
     ir_scores = belief_state.get_feature_scores('expected_ir')
-    prob_positive = belief_state.get_feature_scores('probability_positive')
     mean_alpha = belief_state.get_feature_scores('mean')
 
+    # Pure IR selection: include all candidates, let greedy pick best by utility
     valid_candidates = []
     for i in range(n_features):
-        # Filter by learned probability threshold
-        if candidate_mask[i] and prob_positive[i] >= min_prob_positive:
+        if candidate_mask[i]:
             valid_candidates.append(i)
 
     if len(valid_candidates) == 0:
@@ -740,26 +742,23 @@ def compute_ensemble_expected_utility(feature_indices: List[int],
 
 
 def select_features_bayesian(belief_state: BeliefState,
-                              method: str = 'expected_ir',
-                              mc_passing_features: Optional[np.ndarray] = None) -> Tuple[List[int], int]:
+                              method: str = 'expected_ir') -> Tuple[List[int], int]:
     """
     Select features using LEARNED hyperparameters.
+
+    Args:
+        belief_state: Bayesian beliefs about features
+        method: Selection method ('greedy_bayesian' or other)
 
     Returns: (selected_features, ensemble_size)
     """
     n_features = belief_state.n_features
-
-    if mc_passing_features is not None and USE_MC_PREFILTER:
-        candidate_mask = mc_passing_features
-    else:
-        candidate_mask = np.ones(n_features, dtype=bool)
+    candidate_mask = np.ones(n_features, dtype=bool)
 
     if method == 'greedy_bayesian':
         return select_features_greedy_bayesian(belief_state, candidate_mask)
 
-    # Use fixed probability threshold (removed learned hyperparameter)
-    min_prob_positive = DEFAULT_MIN_PROBABILITY_POSITIVE
-
+    # Pure IR selection (no probability threshold)
     scores = belief_state.get_feature_scores(method)
     scores[~candidate_mask] = -np.inf
     selected_indices = np.argsort(scores)[::-1]
@@ -768,92 +767,11 @@ def select_features_bayesian(belief_state: BeliefState,
     for idx in selected_indices:
         if not candidate_mask[idx]:
             continue
-        belief = belief_state.beliefs[idx]
-        # Use LEARNED threshold
-        if belief.probability_positive() >= min_prob_positive:
-            selected.append(int(idx))
-            if len(selected) >= MAX_ENSEMBLE_SIZE:
-                break
+        selected.append(int(idx))
+        if len(selected) >= MAX_ENSEMBLE_SIZE:
+            break
 
     return selected, len(selected)
-
-
-def get_mc_passing_features(belief_state: BeliefState, data: dict,
-                             n_satellites: int, test_idx: int) -> Tuple[Optional[np.ndarray], int]:
-    """
-    Get features that pass MC filter using LEARNED confidence level.
-
-    Returns: (passing_mask, n_passing)
-    """
-    mc_data = data.get('mc_data')
-    if mc_data is None:
-        return None, 0
-
-    mc_n_satellites = mc_data['n_satellites']
-    n_to_idx = {int(n): i for i, n in enumerate(mc_n_satellites)}
-
-    if n_satellites not in n_to_idx:
-        return None, 0
-
-    mc_idx = n_to_idx[n_satellites]
-    mc_hitrates = mc_data['mc_hitrates'][mc_idx]
-    # Load IR statistics from MC
-    mc_ir_mean = mc_data['mc_ir_mean'][mc_idx]
-    mc_ir_std = mc_data['mc_ir_std'][mc_idx]
-    mc_candidate_mask = mc_data['candidate_masks'][mc_idx]
-
-    mc_config = mc_data.get('config', None)
-    if mc_config is not None:
-        mc_config = mc_config.item() if hasattr(mc_config, 'item') else mc_config
-        mc_n_samples = mc_config.get('n_simulations', 1000)
-    else:
-        mc_n_samples = 1000
-
-    if test_idx >= mc_hitrates.shape[0]:
-        return None, 0
-
-    n_features = mc_hitrates.shape[1]
-    passing_mask = np.zeros(n_features, dtype=bool)
-
-    date_candidates = mc_candidate_mask[test_idx]
-    date_hr_values = mc_hitrates[test_idx, date_candidates]
-    date_ir_values = mc_ir_mean[test_idx, date_candidates]
-
-    valid_hr = date_hr_values[~np.isnan(date_hr_values)]
-    valid_ir = date_ir_values[~np.isnan(date_ir_values)]
-
-    if len(valid_hr) == 0 or len(valid_ir) == 0:
-        return None, 0
-
-    baseline_hr = np.mean(valid_hr)
-    baseline_ir = np.mean(valid_ir)
-
-    # Use fixed confidence level for feature filtering (removed learned hyperparameter)
-    mc_confidence = DEFAULT_MC_CONFIDENCE_LEVEL
-    t_crit = stats.t.ppf(mc_confidence, df=max(1, mc_n_samples - 1))
-
-    for feat_idx in range(n_features):
-        if not date_candidates[feat_idx]:
-            continue
-
-        hr = mc_hitrates[test_idx, feat_idx]
-        ir_mu = mc_ir_mean[test_idx, feat_idx]
-        ir_std = mc_ir_std[test_idx, feat_idx]
-
-        if np.isnan(hr) or np.isnan(ir_mu):
-            continue
-
-        hr_se = np.sqrt(hr * (1 - hr) / mc_n_samples) if 0 < hr < 1 else 0
-        ir_se = ir_std / np.sqrt(mc_n_samples) if ir_std > 0 else 0
-
-        hr_ci_lower = hr - t_crit * hr_se
-        ir_ci_lower = ir_mu - t_crit * ir_se
-
-        # Feature passes if either hit rate or IR significantly exceeds baseline
-        if hr_ci_lower > baseline_hr or ir_ci_lower > baseline_ir:
-            passing_mask[feat_idx] = True
-
-    return passing_mask, int(passing_mask.sum())
 
 
 # ============================================================
@@ -862,7 +780,7 @@ def get_mc_passing_features(belief_state: BeliefState, data: dict,
 
 def walk_forward_backtest(data: dict, n_satellites: int,
                           show_progress: bool = True) -> Tuple[pd.DataFrame, List[dict]]:
-    """Run walk-forward backtest with 6 learned hyperparameters."""
+    """Run walk-forward backtest with 3 learned hyperparameters."""
     dates = data['dates']
     isins = data['isins']
     rankings = data['rankings']
@@ -882,8 +800,6 @@ def walk_forward_backtest(data: dict, n_satellites: int,
     if show_progress:
         print(f"\n  Testing N={n_satellites}")
         print(f"  Test period: {dates[test_start_idx].date()} to {dates[-1].date()}")
-        print(f"  Learning 6 hyperparameters: Decay, Prior Strength, Alpha Weight,")
-        print(f"                              Prob Threshold, MC Confidence, Greedy Threshold")
 
     results = []
     hp_diagnostics = []
@@ -891,7 +807,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
     months_since_reopt = REOPTIMIZATION_FREQUENCY
     selected_features = None
 
-    # Persist ALL hyperparameter beliefs across months
+    # Persist ALL hyperparameter beliefs across months (2 learned parameters)
     persistent_decay_belief = None
     persistent_prior_strength_belief = None
 
@@ -902,24 +818,10 @@ def walk_forward_backtest(data: dict, n_satellites: int,
     for test_idx in iterator:
         test_date = dates[test_idx]
 
-        # Get MC passing features using LEARNED confidence level
-        mc_passing = None
-        n_mc_passing = 0
-        if USE_MC_PREFILTER and belief_state is not None:
-            mc_passing, n_mc_passing = get_mc_passing_features(
-                belief_state, data, n_satellites, test_idx
-            )
-        elif USE_MC_PREFILTER:
-            # First iteration - use default
-            temp_state = BeliefState(n_features, feature_names)
-            mc_passing, n_mc_passing = get_mc_passing_features(
-                temp_state, data, n_satellites, test_idx
-            )
-
         if months_since_reopt >= REOPTIMIZATION_FREQUENCY:
             belief_state = BeliefState(n_features, feature_names)
 
-            # Restore persistent hyperparameter beliefs
+            # Restore persistent hyperparameter beliefs (2 learned parameters)
             if persistent_decay_belief is not None:
                 belief_state.decay_belief = persistent_decay_belief
                 belief_state.prior_strength_belief = persistent_prior_strength_belief
@@ -927,19 +829,12 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             initialize_beliefs_from_mc(belief_state, data, n_satellites, test_idx)
             update_beliefs_from_history(belief_state, data, n_satellites, test_idx)
 
-            # Save updated hyperparameter beliefs
+            # Save updated hyperparameter beliefs (2 learned parameters)
             persistent_decay_belief = belief_state.decay_belief
             persistent_prior_strength_belief = belief_state.prior_strength_belief
 
-            # Re-get MC passing with updated beliefs
-            if USE_MC_PREFILTER:
-                mc_passing, n_mc_passing = get_mc_passing_features(
-                    belief_state, data, n_satellites, test_idx
-                )
-
             selected_features, ensemble_size = select_features_bayesian(
-                belief_state, method=SELECTION_METHOD,
-                mc_passing_features=mc_passing
+                belief_state, method=SELECTION_METHOD
             )
 
             months_since_reopt = 0
@@ -988,13 +883,12 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'avg_alpha': avg_alpha,
             'n_selected': len(selected_isin_names),
             'n_features': len(selected_features),
-            'n_mc_passing': n_mc_passing,
             'learned_decay': current_decay,
             'learned_prior_strength': current_prior_strength,
             'selected_isins': ','.join(selected_isin_names)
         })
 
-        # Record diagnostics
+        # Record diagnostics (2 learned hyperparameters)
         hp_diagnostics.append({
             'date': test_date,
             'decay': current_decay,
@@ -1061,7 +955,7 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
 
 
 def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
-    """Print hyperparameter evolution."""
+    """Print hyperparameter evolution (2 learned parameters)."""
     if len(hp_diagnostics) == 0:
         return
 
@@ -1091,9 +985,9 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
 # ============================================================
 
 def main():
-    """Run Bayesian strategy backtest with 2 learned hyperparameters (decay + prior_strength)."""
+    """Run Bayesian strategy backtest with 2 learned hyperparameters."""
     print("=" * 70)
-    print("BAYESIAN STRATEGY WITH LEARNED HYPERPARAMETERS")
+    print("BAYESIAN STRATEGY WITH LEARNED HYPERPARAMETERS (2 total)")
     print("=" * 70)
     print(f"\nConfiguration:")
     print(f"  Holding period: {HOLDING_MONTHS} month")
@@ -1103,7 +997,6 @@ def main():
     print(f"  2. Prior Strength: Gamma({PRIOR_STRENGTH_SHAPE}, {PRIOR_STRENGTH_SCALE}) -> [{PRIOR_STRENGTH_MIN}, {PRIOR_STRENGTH_MAX}]")
     print(f"\nFeature Selection:")
     print(f"  Method: {SELECTION_METHOD}")
-    print(f"  MC pre-filter: {USE_MC_PREFILTER}")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -1136,7 +1029,7 @@ def main():
                 print(f"    Annual Alpha: {stats['annual_alpha']*100:.1f}%")
                 print(f"    Hit Rate: {stats['hit_rate']:.2%}")
                 print(f"    Information Ratio: {stats['information_ratio']:.3f}")
-                print(f"\n  Learned Hyperparameters (final):")
+                print(f"\n  Learned Hyperparameters (final, 2 total):")
                 print(f"    Decay: {stats['final_decay']:.4f}")
                 print(f"    Prior Strength: {stats['final_prior_strength']:.1f}")
 
@@ -1151,14 +1044,14 @@ def main():
 
     # Print summary
     print("\n" + "=" * 70)
-    print("SUMMARY - BAYESIAN STRATEGY WITH 6 LEARNED HYPERPARAMETERS")
+    print("SUMMARY - BAYESIAN STRATEGY WITH 2 LEARNED HYPERPARAMETERS")
     print("=" * 70)
     print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
 
     if len(all_stats) > 0:
         summary_df = pd.DataFrame(all_stats)
 
-        print("\n" + "-" * 140)
+        print("\n" + "-" * 75)
         print(f"{'N':>3} {'Periods':>8} {'Monthly':>10} {'Annual':>10} {'Hit Rate':>10} "
               f"{'IR':>8} {'Decay':>7} {'Prior':>7}")
         print("-" * 75)
