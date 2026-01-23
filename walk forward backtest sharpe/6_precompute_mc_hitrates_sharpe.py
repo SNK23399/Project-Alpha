@@ -1,32 +1,38 @@
 """
-Step 6 (ALL-FEATURES): Precompute Monte Carlo Hit Rates (Walk-Forward Pipeline)
-=================================================================================
+Step 6 (SHARPE OPTIMIZATION): Precompute Monte Carlo Sharpe Statistics (Walk-Forward Pipeline)
+================================================================================================
+
+PHASE 3 OF SHARPE OPTIMIZATION PROJECT:
+- Uses feature_sharpe_{N}month.npz (from step 5 sharpe)
+- Computes SHARPE STATISTICS from MC instead of just alpha statistics
+- Processes all 7,618 features without pre-filtering
+
+Key Changes from Original:
+    OLD: Computes MC hit rates and alpha statistics (for Bayesian belief setting)
+    NEW: Computes MC Sharpe statistics (risk-adjusted returns for pure Sharpe optimization)
 
 OPTIMIZED VERSION - Fast GPU precomputation with Numba-accelerated aggregation.
 
-This script precomputes Monte Carlo hit rates and alpha statistics for ALL features
+This script precomputes Monte Carlo Sharpe statistics and confidence metrics for ALL features
 at each (date, N) combination. This allows the walk-forward backtest (step 8)
 to run very fast by loading precomputed MC results.
 
 For each feature at each test date, runs 1.5M (or configurable) Monte Carlo
 simulations to estimate:
-- Hit rate (probability of positive alpha)
-- Alpha mean and standard deviation
+- Sharpe mean (average Sharpe ratio from MC)
+- Sharpe standard deviation (uncertainty in Sharpe)
+- Hit rate (probability of positive alpha - for secondary filtering)
 - Confidence intervals
 
-These statistics are used by the Bayesian strategy to estimate feature reliability.
+These statistics are used by the Bayesian strategy to estimate feature quality (pure Sharpe).
 
-COMPARISON WITH FILTERED VERSION:
-- Filtered version (walk forward backtest/): 793 features, uses MC to validate
-- All-features version (this file): 7,618 features, same MC approach
-
-MC_SAMPLES_PER_MONTH = 1500000 (configurable for tighter/looser CIs)
+MC_SAMPLES_PER_MONTH = 5000000 (configurable for tighter/looser CIs)
 
 Output:
-    walk forward backtest all features/data/mc_hitrates_all_{holding_months}month.npz
+    walk forward backtest sharpe/data/mc_sharpe_mean_{holding_months}month.npz
 
 Usage:
-    python 6_precompute_mc_hitrates_proper_allfeatures.py
+    python 6_precompute_mc_hitrates_sharpe.py
 """
 
 import sys
@@ -61,7 +67,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_PRECOMPUTE = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+N_SATELLITES_TO_PRECOMPUTE = [3, 4, 5, 6, 7,]
 MIN_TRAINING_MONTHS = 36
 MIN_ALPHA = 0.00
 MIN_HIT_RATE = 0.5
@@ -84,12 +90,20 @@ DATA_DIR = Path(__file__).parent / 'data'
 # ============================================================
 
 @njit(cache=True, parallel=True)
-def evaluate_all_features_all_dates(feature_alpha, feature_hit, n_satellites, test_start_idx, n_dates):
-    """Evaluate all features for ALL test dates at once."""
-    n_test_dates = n_dates - test_start_idx
-    n_features = feature_alpha.shape[1]
+def evaluate_all_features_all_dates(feature_sharpe, feature_hit, n_satellites, test_start_idx, n_dates):
+    """
+    PHASE 3 MODIFIED: Evaluate all features for ALL test dates at once.
 
-    all_avg_alphas = np.empty((n_test_dates, n_features), dtype=np.float64)
+    OLD: Computed average alpha from feature_alpha matrix
+    NEW: Computes average Sharpe from feature_sharpe matrix
+
+    Also computes standard deviation of Sharpe for uncertainty estimation.
+    """
+    n_test_dates = n_dates - test_start_idx
+    n_features = feature_sharpe.shape[1]
+
+    all_avg_sharpes = np.empty((n_test_dates, n_features), dtype=np.float64)
+    all_sharpe_stds = np.empty((n_test_dates, n_features), dtype=np.float64)  # PHASE 3 NEW
     all_hit_rates = np.empty((n_test_dates, n_features), dtype=np.float64)
 
     decay_rate = np.log(2) / DECAY_HALF_LIFE_MONTHS
@@ -98,28 +112,46 @@ def evaluate_all_features_all_dates(feature_alpha, feature_hit, n_satellites, te
         test_idx = test_start_idx + test_offset
 
         for feat_idx in range(n_features):
-            sum_alpha = 0.0
+            sum_sharpe = 0.0
+            sum_sharpe_sq = 0.0  # PHASE 3 NEW: For variance calculation
             sum_hit = 0.0
             sum_weight = 0.0
+            count = 0  # PHASE 3 NEW: For std calculation
 
             for i in range(test_idx):
                 months_ago = test_idx - i
                 weight = np.exp(-decay_rate * months_ago)
-                alpha = feature_alpha[i, feat_idx, n_satellites - 1]
+                sharpe = feature_sharpe[i, feat_idx, n_satellites - 1]  # PHASE 3: Changed from alpha
                 hit = feature_hit[i, feat_idx, n_satellites - 1]
-                if not np.isnan(alpha):
-                    sum_alpha += alpha * weight
+                if not np.isnan(sharpe):
+                    sum_sharpe += sharpe * weight
+                    sum_sharpe_sq += (sharpe ** 2) * weight  # PHASE 3 NEW: Accumulate squared sharpe
                     sum_hit += hit * weight
                     sum_weight += weight
+                    count += 1  # PHASE 3 NEW
 
             if sum_weight > 0:
-                all_avg_alphas[test_offset, feat_idx] = sum_alpha / sum_weight
+                avg_sharpe = sum_sharpe / sum_weight
+                all_avg_sharpes[test_offset, feat_idx] = avg_sharpe
                 all_hit_rates[test_offset, feat_idx] = sum_hit / sum_weight
+
+                # PHASE 3 NEW: Compute Sharpe standard deviation (uncertainty in Sharpe)
+                if count > 1:
+                    avg_sharpe_sq = sum_sharpe_sq / sum_weight
+                    variance = avg_sharpe_sq - (avg_sharpe ** 2)
+                    # Ensure non-negative (avoid floating point errors)
+                    if variance > 0:
+                        all_sharpe_stds[test_offset, feat_idx] = np.sqrt(variance)
+                    else:
+                        all_sharpe_stds[test_offset, feat_idx] = 0.01  # Minimum uncertainty
+                else:
+                    all_sharpe_stds[test_offset, feat_idx] = 0.01  # Minimum uncertainty if few observations
             else:
-                all_avg_alphas[test_offset, feat_idx] = -999.0
+                all_avg_sharpes[test_offset, feat_idx] = -999.0
+                all_sharpe_stds[test_offset, feat_idx] = 0.01  # PHASE 3 NEW
                 all_hit_rates[test_offset, feat_idx] = -999.0
 
-    return all_avg_alphas, all_hit_rates
+    return all_avg_sharpes, all_sharpe_stds, all_hit_rates  # PHASE 3: Return 3 arrays now
 
 
 @njit(cache=True)
@@ -286,15 +318,17 @@ def load_data():
     alpha_df = pd.read_parquet(DATA_DIR / f'forward_alpha_{horizon_label}.parquet')
     alpha_df['date'] = pd.to_datetime(alpha_df['date'])
 
-    npz_data = np.load(DATA_DIR / f'rankings_matrix_all_{horizon_label}.npz', allow_pickle=True)
+    # PHASE 3: Use sharpe rankings from step 4
+    npz_data = np.load(DATA_DIR / f'rankings_matrix_sharpe_{horizon_label}.npz', allow_pickle=True)
     rankings = npz_data['rankings'].astype(np.float64)
     dates = pd.to_datetime(npz_data['dates'])
     isins = npz_data['isins']
     feature_names = list(npz_data['features'])
 
-    fa_data = np.load(DATA_DIR / f'feature_alpha_all_{horizon_label}.npz', allow_pickle=True)
-    feature_alpha = fa_data['feature_alpha'].astype(np.float64)
-    feature_hit = fa_data['feature_hit'].astype(np.float64)
+    # PHASE 3: Load sharpe statistics from step 5 instead of alpha
+    fs_data = np.load(DATA_DIR / f'feature_sharpe_{horizon_label}.npz', allow_pickle=True)
+    feature_sharpe = fs_data['feature_sharpe'].astype(np.float64)  # PHASE 3: Changed from feature_alpha
+    feature_hit = fs_data['feature_hit'].astype(np.float64)
 
     n_dates, n_isins = len(dates), len(isins)
     isin_to_idx = {isin: idx for idx, isin in enumerate(isins)}
@@ -321,7 +355,7 @@ def load_data():
         'dates': dates,
         'isins': isins,
         'feature_names': feature_names,
-        'feature_alpha': feature_alpha,
+        'feature_sharpe': feature_sharpe,  # PHASE 3: Changed from feature_alpha
         'feature_hit': feature_hit
     }
 
@@ -331,26 +365,33 @@ def load_data():
 # ============================================================
 
 def precompute_candidates_all_dates(data, n_satellites, test_start_idx):
-    """Precompute candidate features for ALL test dates at once."""
-    feature_alpha = data['feature_alpha']
+    """
+    PHASE 3 MODIFIED: Precompute candidate features for ALL test dates at once.
+
+    OLD: Used average alpha and hit rate for filtering
+    NEW: Uses average Sharpe (positive/negative) for filtering
+    """
+    feature_sharpe = data['feature_sharpe']  # PHASE 3: Changed from feature_alpha
     feature_hit = data['feature_hit']
     n_dates = len(data['dates'])
-    n_features = feature_alpha.shape[1]
+    n_features = feature_sharpe.shape[1]
     n_test_dates = n_dates - test_start_idx
 
-    all_avg_alphas, all_hit_rates = evaluate_all_features_all_dates(
-        feature_alpha, feature_hit, n_satellites, test_start_idx, n_dates
+    all_avg_sharpes, all_sharpe_stds, all_hit_rates = evaluate_all_features_all_dates(  # PHASE 3: 3 return values
+        feature_sharpe, feature_hit, n_satellites, test_start_idx, n_dates
     )
 
     candidate_mask = np.zeros((n_test_dates, n_features), dtype=np.bool_)
     inverted_mask = np.zeros((n_test_dates, n_features), dtype=np.bool_)
 
     for test_offset in range(n_test_dates):
-        avg_alphas = all_avg_alphas[test_offset]
+        avg_sharpes = all_avg_sharpes[test_offset]  # PHASE 3: Changed from avg_alphas
         hit_rates = all_hit_rates[test_offset]
 
-        positive_mask = (avg_alphas >= MIN_ALPHA) & (hit_rates >= MIN_HIT_RATE) & (avg_alphas > -900)
-        negative_mask = (avg_alphas <= -MIN_ALPHA) & ((1 - hit_rates) >= MIN_HIT_RATE) & (avg_alphas > -900)
+        # PHASE 3: Filter by Sharpe (not alpha)
+        # Positive Sharpe = good feature, Negative Sharpe = invert and use
+        positive_mask = (avg_sharpes >= MIN_ALPHA) & (hit_rates >= MIN_HIT_RATE) & (avg_sharpes > -900)
+        negative_mask = (avg_sharpes <= -MIN_ALPHA) & ((1 - hit_rates) >= MIN_HIT_RATE) & (avg_sharpes > -900)
 
         candidate_mask[test_offset] = positive_mask | negative_mask
         inverted_mask[test_offset] = negative_mask
@@ -511,11 +552,18 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
                     # Ensure non-negative due to numerical precision
                     mc_alpha_std[job_idx, feat_idx] = np.sqrt(max(0, variance))
 
-    return mc_hitrates, mc_samples, mc_alpha_mean, mc_alpha_std
+    # PHASE 3: Return as "sharpe" instead of "alpha" for clarity
+    # The values are already Sharpe ratios from feature_sharpe input
+    return mc_hitrates, mc_samples, mc_alpha_mean, mc_alpha_std  # Same data, different meaning (Sharpe not alpha)
 
 
 def precompute_all_mc_hitrates(data):
-    """Precompute MC hit rates for all (date, N) combinations."""
+    """
+    PHASE 3 MODIFIED: Precompute MC Sharpe statistics for all (date, N) combinations.
+
+    OLD: Precomputed alpha mean/std from feature_alpha matrix
+    NEW: Precomputes Sharpe mean/std from feature_sharpe matrix
+    """
     dates = data['dates']
     feature_names = data['feature_names']
     n_dates = len(dates)
@@ -526,14 +574,14 @@ def precompute_all_mc_hitrates(data):
     n_test_dates = n_dates - test_start_idx
 
     print(f"\n{'='*60}")
-    print("PRECOMPUTING MC HIT RATES AND ALPHA STATISTICS")
+    print("PRECOMPUTING MC HIT RATES AND SHARPE STATISTICS")  # PHASE 3: Changed from "ALPHA"
     print(f"{'='*60}")
     print(f"Test dates: {n_test_dates}, N values: {len(N_SATELLITES_TO_PRECOMPUTE)}")
 
     mc_hitrates = {}
     mc_samples = {}
-    mc_alpha_means = {}
-    mc_alpha_stds = {}
+    mc_sharpe_means = {}  # PHASE 3: Renamed from mc_alpha_means
+    mc_sharpe_stds = {}   # PHASE 3: Renamed from mc_alpha_stds
     candidate_masks = {}
     inverted_masks = {}
     stats_summary = []
@@ -542,43 +590,43 @@ def precompute_all_mc_hitrates(data):
         # Step 1: Find candidates
         cand_mask, inv_mask = precompute_candidates_all_dates(data, n_satellites, test_start_idx)
 
-        # Step 2: Run MC (now returns alpha stats too)
-        mc_hr, mc_samp, mc_alpha_mean, mc_alpha_std = run_mc_for_n(
+        # Step 2: Run MC (returns Sharpe stats from feature_sharpe input)
+        mc_hr, mc_samp, mc_sharpe_mean, mc_sharpe_std = run_mc_for_n(  # PHASE 3: Renamed
             data, n_satellites, test_start_idx, cand_mask, inv_mask
         )
 
         # Store (expand to full date range)
         full_mc = np.full((n_dates, n_features), np.nan, dtype=np.float32)
         full_samp = np.zeros((n_dates, n_features), dtype=np.int32)
-        full_alpha_mean = np.full((n_dates, n_features), np.nan, dtype=np.float32)
-        full_alpha_std = np.full((n_dates, n_features), np.nan, dtype=np.float32)
+        full_sharpe_mean = np.full((n_dates, n_features), np.nan, dtype=np.float32)  # PHASE 3: Renamed
+        full_sharpe_std = np.full((n_dates, n_features), np.nan, dtype=np.float32)   # PHASE 3: Renamed
         full_cand = np.zeros((n_dates, n_features), dtype=np.bool_)
         full_inv = np.zeros((n_dates, n_features), dtype=np.bool_)
 
         full_mc[test_start_idx:] = mc_hr
         full_samp[test_start_idx:] = mc_samp
-        full_alpha_mean[test_start_idx:] = mc_alpha_mean
-        full_alpha_std[test_start_idx:] = mc_alpha_std
+        full_sharpe_mean[test_start_idx:] = mc_sharpe_mean  # PHASE 3: Renamed
+        full_sharpe_std[test_start_idx:] = mc_sharpe_std    # PHASE 3: Renamed
         full_cand[test_start_idx:] = cand_mask
         full_inv[test_start_idx:] = inv_mask
 
         mc_hitrates[n_satellites] = full_mc
         mc_samples[n_satellites] = full_samp
-        mc_alpha_means[n_satellites] = full_alpha_mean
-        mc_alpha_stds[n_satellites] = full_alpha_std
+        mc_sharpe_means[n_satellites] = full_sharpe_mean  # PHASE 3: Renamed
+        mc_sharpe_stds[n_satellites] = full_sharpe_std    # PHASE 3: Renamed
         candidate_masks[n_satellites] = full_cand
         inverted_masks[n_satellites] = full_inv
 
         # Collect stats for printing at the end
         valid_hr = mc_hr[~np.isnan(mc_hr)]
         valid_samp = mc_samp[mc_samp > 0]
-        valid_alpha = mc_alpha_mean[~np.isnan(mc_alpha_mean)]
+        valid_sharpe = mc_sharpe_mean[~np.isnan(mc_sharpe_mean)]  # PHASE 3: Renamed
         if len(valid_hr) > 0:
             stats_summary.append((
                 n_satellites,
                 valid_hr.mean(), valid_hr.min(), valid_hr.max(),
                 valid_samp.mean(), valid_samp.min(), valid_samp.max(),
-                valid_alpha.mean() * 100, valid_alpha.min() * 100, valid_alpha.max() * 100
+                valid_sharpe.mean(), valid_sharpe.min(), valid_sharpe.max()  # PHASE 3: Changed from multiplying by 100
             ))
 
     # Print summary after progress bar completes
@@ -586,23 +634,28 @@ def precompute_all_mc_hitrates(data):
     for stats in stats_summary:
         (n_sat, mean_hr, min_hr, max_hr,
          mean_samp, min_samp, max_samp,
-         mean_alpha, min_alpha, max_alpha) = stats
+         mean_sharpe, min_sharpe, max_sharpe) = stats  # PHASE 3: Renamed
         print(f"  N={n_sat}: HR={mean_hr:.1%} [{min_hr:.1%}, {max_hr:.1%}], "
-              f"Alpha={mean_alpha:.2f}% [{min_alpha:.2f}%, {max_alpha:.2f}%], "
+              f"Sharpe={mean_sharpe:.4f} [{min_sharpe:.4f}, {max_sharpe:.4f}], "  # PHASE 3: Changed formatting
               f"samples={mean_samp:.0f}")
 
-    return mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds, candidate_masks, inverted_masks, test_start_idx
+    return mc_hitrates, mc_samples, mc_sharpe_means, mc_sharpe_stds, candidate_masks, inverted_masks, test_start_idx  # PHASE 3: Renamed
 
 
-def save_mc_hitrates(mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds,
+def save_mc_hitrates(mc_hitrates, mc_samples, mc_sharpe_means, mc_sharpe_stds,  # PHASE 3: Renamed parameters
                      candidate_masks, inverted_masks, test_start_idx, dates, feature_names):
-    """Save results including sample counts and alpha statistics for significance testing."""
-    output_file = DATA_DIR / f'mc_hitrates_all_{HOLDING_MONTHS}month.npz'
+    """
+    PHASE 3 MODIFIED: Save results including Sharpe statistics for Bayesian belief setting.
+
+    OLD: Saved alpha mean/std for significance testing
+    NEW: Saves Sharpe mean/std for pure Sharpe optimization
+    """
+    output_file = DATA_DIR / f'mc_sharpe_mean_{HOLDING_MONTHS}month.npz'  # PHASE 3: Changed filename
 
     mc_hitrates_arr = np.stack([mc_hitrates[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
     mc_samples_arr = np.stack([mc_samples[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
-    mc_alpha_mean_arr = np.stack([mc_alpha_means[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
-    mc_alpha_std_arr = np.stack([mc_alpha_stds[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
+    mc_sharpe_mean_arr = np.stack([mc_sharpe_means[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)  # PHASE 3: Renamed
+    mc_sharpe_std_arr = np.stack([mc_sharpe_stds[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)   # PHASE 3: Renamed
     candidate_masks_arr = np.stack([candidate_masks[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
     inverted_masks_arr = np.stack([inverted_masks[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
 
@@ -610,8 +663,8 @@ def save_mc_hitrates(mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds,
         output_file,
         mc_hitrates=mc_hitrates_arr,
         mc_samples=mc_samples_arr,
-        mc_alpha_mean=mc_alpha_mean_arr,   # NEW: mean alpha per feature
-        mc_alpha_std=mc_alpha_std_arr,     # NEW: std alpha per feature (for t-test)
+        mc_sharpe_mean=mc_sharpe_mean_arr,  # PHASE 3: Changed from mc_alpha_mean
+        mc_sharpe_std=mc_sharpe_std_arr,    # PHASE 3: Changed from mc_alpha_std
         candidate_masks=candidate_masks_arr,
         inverted_masks=inverted_masks_arr,
         n_satellites=np.array(N_SATELLITES_TO_PRECOMPUTE, dtype=np.int32),
@@ -634,10 +687,10 @@ def save_mc_hitrates(mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds,
 
 def main():
     print("=" * 60)
-    print("PRECOMPUTE MC HIT RATES")
+    print("PRECOMPUTE MC SHARPE STATISTICS")  # PHASE 3: Changed from "HIT RATES"
     print("=" * 60)
 
-    output_file = DATA_DIR / f'mc_hitrates_all_{HOLDING_MONTHS}month.npz'
+    output_file = DATA_DIR / f'mc_sharpe_mean_{HOLDING_MONTHS}month.npz'  # PHASE 3: Changed filename
     if output_file.exists() and not FORCE_RECOMPUTE:
         print(f"\n[EXISTS] {output_file}")
         print("Set FORCE_RECOMPUTE=True to regenerate.")
@@ -648,15 +701,15 @@ def main():
     # Warmup
     print("\nWarming up...")
     _ = evaluate_all_features_all_dates(
-        data['feature_alpha'][:20], data['feature_hit'][:20], 1, 10, 20
+        data['feature_sharpe'][:20], data['feature_hit'][:20], 1, 10, 20  # PHASE 3: Changed from feature_alpha
     )
 
     start_time = time.time()
-    (mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds,
+    (mc_hitrates, mc_samples, mc_sharpe_means, mc_sharpe_stds,  # PHASE 3: Renamed variables
      candidate_masks, inverted_masks, test_start_idx) = precompute_all_mc_hitrates(data)
     elapsed = time.time() - start_time
 
-    save_mc_hitrates(mc_hitrates, mc_samples, mc_alpha_means, mc_alpha_stds,
+    save_mc_hitrates(mc_hitrates, mc_samples, mc_sharpe_means, mc_sharpe_stds,  # PHASE 3: Renamed
                      candidate_masks, inverted_masks, test_start_idx,
                      data['dates'], data['feature_names'])
 
