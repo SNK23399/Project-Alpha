@@ -29,13 +29,6 @@ INFORMATION RATIO OPTIMIZATION:
   - Portfolio IR goal: Maximize consistent outperformance vs MSCI World
   - Uses MC-estimated IR statistics for Bayesian feature selection
 
-RECOMMENDED CONFIGURATION:
---------------------------
-N=5 satellites is theoretically grounded and empirically validated:
-- Provides good diversification benefit
-- Lower portfolio volatility than extreme N values
-- Statistical analysis shows N selection is noise (not predictable)
-
 Usage:
     python bayesian_strategy_ir.py
 
@@ -69,8 +62,9 @@ sys.path.insert(0, str(project_root))
 # Holding period
 HOLDING_MONTHS = 1
 
-# N values to test (N=5 is recommended - see docstring)
-N_SATELLITES_TO_TEST = [3, 4, 5, 6, 7]  # Use [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] to test all
+# N values to test (satellite portfolio size)
+# Test range determines how many top-ranked features to select each month
+N_SATELLITES_TO_TEST = [3, 4, 5, 6, 7]
 
 # Training parameters
 MIN_TRAINING_MONTHS = 36
