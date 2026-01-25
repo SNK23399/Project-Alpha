@@ -40,8 +40,8 @@ class WalkForwardSatelliteSelectionPipeline:
     """
     Orchestrates complete walk-forward satellite selection pipeline.
 
-    Steps 0-2: Compute forward alpha, signal bases, and filters.
-    Steps 5-7: Precompute feature-IR, MC statistics, and select satellites.
+    Steps 1-3: Compute forward alpha, signal bases, and filters.
+    Steps 4-6: Precompute feature-IR, MC statistics, and select satellites.
     """
 
     def __init__(self):
@@ -256,7 +256,7 @@ class WalkForwardSatelliteSelectionPipeline:
             raise
 
     # ========================================================================
-    # STEP 6: Precompute MC Information Ratio Statistics
+    # STEP 5: Precompute MC Information Ratio Statistics
     # ========================================================================
 
     def step_5_precompute_mc_ir_stats(self) -> dict:

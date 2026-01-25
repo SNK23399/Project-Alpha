@@ -472,9 +472,9 @@ def compute_feature_alphas_for_date(rankings, feature_indices, alpha_matrix,
 # ============================================================
 
 def load_data():
-    """Load precomputed data from Steps 0, 2, and 6."""
+    """Load precomputed data from Steps 1, 3, and 5."""
     print("=" * 120)
-    print("LOADING DATA FROM STEPS 0, 2, 6")
+    print("LOADING DATA FROM STEPS 1, 3, 5")
     print("=" * 120)
 
     horizon_label = f"{HOLDING_MONTHS}month"
@@ -905,6 +905,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
             'date': test_date,
             'decay': current_decay,
             'prior_strength': current_prior_strength,
+            'monthly_alpha': avg_alpha,
         })
 
         # Update feature beliefs
@@ -944,6 +945,10 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
     results_df['cumulative'] = (1 + results_df['avg_alpha']).cumprod() - 1
     total_return = results_df['cumulative'].iloc[-1]
 
+    # Calculate true CAGR (Compound Annual Growth Rate)
+    years = len(results_df) / 12
+    cagr = (1 + total_return) ** (1 / years) - 1 if total_return > -1 else 0
+
     # Hyperparameter stats (2 learned parameters)
     avg_decay = results_df['learned_decay'].mean()
     final_decay = results_df['learned_decay'].iloc[-1]
@@ -955,7 +960,7 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
         'n_periods': len(results_df),
         'avg_alpha': avg_alpha,
         'std_alpha': std_alpha,
-        'annual_alpha': avg_alpha * 12,
+        'annual_alpha': cagr,
         'hit_rate': hit_rate,
         'information_ratio': information_ratio,
         'total_return': total_return,
@@ -967,16 +972,25 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
 
 
 def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
-    """Print hyperparameter evolution (2 learned parameters)."""
+    """Print hyperparameter evolution (2 learned parameters) with yearly cumulative alpha."""
     if len(hp_diagnostics) == 0:
         return
 
     df = pd.DataFrame(hp_diagnostics)
+    df['year'] = df['date'].dt.year
+
+    # Calculate yearly cumulative alpha (compound returns for each year)
+    yearly_cumulative = {}
+    for year in df['year'].unique():
+        year_data = df[df['year'] == year]['monthly_alpha'].values
+        # Compound the monthly returns: (1 + r1) * (1 + r2) * ... - 1
+        cumulative = np.prod(1 + year_data) - 1
+        yearly_cumulative[year] = cumulative
 
     print(f"\n  Hyperparameter Evolution (N={n_satellites}):")
-    print(f"  " + "-" * 50)
-    print(f"  {'Date':<12} {'Decay':>8} {'Prior':>8}")
-    print(f"  " + "-" * 50)
+    print(f"  " + "-" * 80)
+    print(f"  {'Date':<12} {'Decay':>8} {'Prior':>8} {'Monthly (%)':>12} {'Yearly (%)':>12}")
+    print(f"  " + "-" * 80)
 
     indices = [0]
     for i in range(12, len(df), 12):
@@ -987,9 +1001,11 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
     for idx in indices:
         row = df.iloc[idx]
         date_str = row['date'].strftime('%Y-%m')
-        print(f"  {date_str:<12} {row['decay']:>8.4f} {row['prior_strength']:>8.1f}")
+        monthly_alpha_pct = row['monthly_alpha'] * 100
+        yearly_alpha_pct = yearly_cumulative[row['year']] * 100
+        print(f"  {date_str:<12} {row['decay']:>8.4f} {row['prior_strength']:>8.1f} {monthly_alpha_pct:>12.2f} {yearly_alpha_pct:>12.2f}")
 
-    print(f"  " + "-" * 50)
+    print(f"  " + "-" * 80)
 
 
 # ============================================================

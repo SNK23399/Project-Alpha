@@ -673,7 +673,7 @@ def main():
         print(f"N values: {list(data['n_satellites'])}")
         return
 
-    # Load data from Steps 0, 2, 5
+    # Load data from Steps 1, 3, 4
     try:
         data = load_data()
     except FileNotFoundError as e:
