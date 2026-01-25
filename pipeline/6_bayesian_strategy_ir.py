@@ -578,7 +578,18 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
     mc_hitrates = mc_data.get('mc_hitrates')  # Optional - may not be present in newer versions
     mc_candidate_mask = mc_data['candidate_masks'][mc_idx]
 
+    # MC data may have fewer features than ranking matrix
+    n_mc_features = mc_candidate_mask.shape[1]
+
     for feat_idx in range(belief_state.n_features):
+        # Only try to use MC data if this feature was computed in MC phase
+        if feat_idx >= n_mc_features:
+            # Feature not in MC data - use default values
+            belief_state.set_prior_from_mc(
+                feat_idx, ir_mean=0.0, ir_std=0.03, hitrate_mu=0.0
+            )
+            continue
+
         valid_dates = []
         for d in range(min(test_idx, mc_ir_mean.shape[0])):
             if mc_candidate_mask[d, feat_idx]:
