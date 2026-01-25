@@ -40,6 +40,7 @@ Usage:
 """
 
 import json
+import pickle
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Union, Tuple
@@ -64,9 +65,9 @@ class SignalDatabase:
         self.states_file = self.data_dir / "filter_states.json"
         self.metadata_file = self.data_dir / "metadata.json"
 
-        # Create directories
+        # Create signal_bases directory only
+        # filtered_signals directory is created on-demand by methods that need it
         self.signal_bases_dir.mkdir(parents=True, exist_ok=True)
-        self.filtered_dir.mkdir(parents=True, exist_ok=True)
 
     # ==================== Signal Bases ====================
 
@@ -89,9 +90,10 @@ class SignalDatabase:
         if not isinstance(signal_df.index, pd.DatetimeIndex):
             signal_df.index = pd.to_datetime(signal_df.index)
 
-        # Save to parquet with snappy compression (fast + good compression)
-        filepath = self.signal_bases_dir / f"{signal_name}.parquet"
-        signal_df.to_parquet(filepath, compression='snappy')
+        # Save only as pickle for fast loading (saves disk space vs parquet)
+        filepath = self.signal_bases_dir / f"{signal_name}.pkl"
+        with open(filepath, 'wb') as f:
+            pickle.dump(signal_df, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # Return count of non-NaN values
         return int((~signal_df.isna()).sum().sum())
@@ -137,13 +139,17 @@ class SignalDatabase:
         Returns:
             DataFrame with dates as index, ISINs as columns
         """
-        filepath = self.signal_bases_dir / f"{signal_name}.parquet"
+        filepath = self.signal_bases_dir / f"{signal_name}.pkl"
         if not filepath.exists():
             return pd.DataFrame()
 
-        # Load with optional column filter
-        columns = isins if isins else None
-        df = pd.read_parquet(filepath, columns=columns)
+        # Load from pickle
+        with open(filepath, 'rb') as f:
+            df = pickle.load(f)
+
+        # Apply column filter if specified
+        if isins:
+            df = df[[col for col in isins if col in df.columns]]
 
         # Apply date filter
         if start_date:
@@ -213,7 +219,7 @@ class SignalDatabase:
 
     def get_available_signals(self) -> List[str]:
         """Get list of available signal base names (sorted for determinism)."""
-        return sorted([f.stem for f in self.signal_bases_dir.glob("*.parquet")])
+        return sorted([f.stem for f in self.signal_bases_dir.glob("*.pkl")])
 
     def get_completed_signals(self) -> set:
         """Get set of signal names already saved (for resume capability)."""
@@ -221,7 +227,7 @@ class SignalDatabase:
 
     def signal_exists(self, signal_name: str) -> bool:
         """Check if a signal base exists."""
-        return (self.signal_bases_dir / f"{signal_name}.parquet").exists()
+        return (self.signal_bases_dir / f"{signal_name}.pkl").exists()
 
     def get_signal_date_range(self, signal_name: str) -> Optional[Tuple[str, str]]:
         """Get date range for a signal base."""
@@ -262,9 +268,9 @@ class SignalDatabase:
         Returns:
             Number of records (non-NaN values)
         """
-        # Create subdirectory for this signal
+        # Create subdirectory for this signal (with parent directories)
         signal_dir = self.filtered_dir / signal_name
-        signal_dir.mkdir(exist_ok=True)
+        signal_dir.mkdir(parents=True, exist_ok=True)
 
         # Save parquet
         filepath = signal_dir / f"{filter_name}.parquet"
@@ -336,8 +342,8 @@ class SignalDatabase:
         Returns:
             Number of records (non-NaN values)
         """
-        # Save as flat parquet file (not nested by signal name)
-        filepath = self.filtered_dir / f"{filtered_signal_name}.parquet"
+        # Ensure filtered_signals directory exists
+        self.filtered_dir.mkdir(parents=True, exist_ok=True)
 
         # Create DataFrame
         df = pd.DataFrame(filtered_data, index=dates, columns=isins)
@@ -346,8 +352,10 @@ class SignalDatabase:
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
 
-        # Save to parquet
-        df.to_parquet(filepath, compression='snappy')
+        # Save only as pickle for fast loading (saves disk space vs parquet)
+        filepath = self.filtered_dir / f"{filtered_signal_name}.pkl"
+        with open(filepath, 'wb') as f:
+            pickle.dump(df, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         return int((~df.isna()).sum().sum())
 
@@ -370,12 +378,17 @@ class SignalDatabase:
         Returns:
             DataFrame with dates as index, ISINs as columns
         """
-        filepath = self.filtered_dir / f"{filtered_signal_name}.parquet"
+        filepath = self.filtered_dir / f"{filtered_signal_name}.pkl"
         if not filepath.exists():
             return pd.DataFrame()
 
-        columns = isins if isins else None
-        df = pd.read_parquet(filepath, columns=columns)
+        # Load from pickle
+        with open(filepath, 'rb') as f:
+            df = pickle.load(f)
+
+        # Apply column filter if specified
+        if isins:
+            df = df[[col for col in isins if col in df.columns]]
 
         if start_date:
             df = df[df.index >= start_date]
@@ -391,11 +404,13 @@ class SignalDatabase:
         Returns:
             Set of filtered signal names like {'momentum_252d__ema_21d', ...}
         """
-        return {f.stem for f in self.filtered_dir.glob("*.parquet")}
+        if not self.filtered_dir.exists():
+            return set()
+        return {f.stem for f in self.filtered_dir.glob("*.pkl")}
 
     def filtered_signal_exists(self, filtered_signal_name: str) -> bool:
         """Check if a filtered signal exists."""
-        return (self.filtered_dir / f"{filtered_signal_name}.parquet").exists()
+        return (self.filtered_dir / f"{filtered_signal_name}.pkl").exists()
 
     def delete_filtered_signal(self, filtered_signal_name: str) -> bool:
         """Delete a filtered signal file."""
@@ -407,8 +422,9 @@ class SignalDatabase:
 
     def clear_all_filtered_signals(self):
         """Delete all filtered signal files."""
-        for f in self.filtered_dir.glob("*.parquet"):
-            f.unlink()
+        if self.filtered_dir.exists():
+            for f in self.filtered_dir.glob("*.parquet"):
+                f.unlink()
 
     # ==================== Filter States ====================
 
@@ -532,12 +548,13 @@ class SignalDatabase:
         # Count filtered signals
         n_filters = 0
         n_filtered_files = 0
-        for signal_dir in self.filtered_dir.iterdir():
-            if signal_dir.is_dir():
-                filters = list(signal_dir.glob("*.parquet"))
-                n_filtered_files += len(filters)
-                if filters:
-                    n_filters = max(n_filters, len(filters))
+        if self.filtered_dir.exists():
+            for signal_dir in self.filtered_dir.iterdir():
+                if signal_dir.is_dir():
+                    filters = list(signal_dir.glob("*.parquet"))
+                    n_filtered_files += len(filters)
+                    if filters:
+                        n_filters = max(n_filters, len(filters))
 
         # Get date range from first signal
         date_range = None

@@ -1337,9 +1337,6 @@ def compute_signal_bases_generator(
     - dispersion_regime: Cross-sectional quantile spread
     - return_dispersion_63d: Cross-sectional std
     """
-    print("Computing signal bases (HYBRID STANDALONE implementation)...")
-    print(f"  Using ORIGINAL implementations for: {sorted(ORIGINAL_ONLY_SIGNALS)}")
-
     if skip_signals is None:
         skip_signals = set()
 
@@ -1376,7 +1373,6 @@ def compute_signal_bases_generator(
     # This prevents forward-filling of NaNs before computing returns,
     # which could introduce subtle look-ahead bias if price data has gaps
     # =========================================================================
-    print("  Computing returns...")
 
     # ETF returns - use pandas pct_change with no forward-fill
     etf_returns = etf_prices.pct_change(fill_method=None)
@@ -1432,7 +1428,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CUMULATIVE RETURNS AND ALPHA - Using fast rolling_sum
     # =========================================================================
-    print("  Computing cumulative returns and alpha...")
     for window in [21, 63, 126, 252]:
         if window < n_time:
             # Cumulative Return
@@ -1453,7 +1448,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # MOMENTUM (using pandas pct_change for exact match with original)
     # =========================================================================
-    print("  Computing momentum...")
     for period in [21, 63, 126, 252]:
         if period < n_time:
             momentum = etf_prices.pct_change(periods=period).values
@@ -1463,7 +1457,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # RELATIVE STRENGTH (using pandas pct_change for exact match with original)
     # =========================================================================
-    print("  Computing relative strength...")
 
     # Pre-compute universe price series for RS vs Universe
     universe_price = etf_prices.mean(axis=1)
@@ -1492,7 +1485,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # SKIP-MONTH MOMENTUM
     # =========================================================================
-    print("  Computing skip-month momentum...")
     for total_period, skip_period in [(63, 21), (63, 42), (63, 63),
                                        (126, 21), (126, 42), (126, 63),
                                        (252, 21), (252, 42), (252, 63)]:
@@ -1513,7 +1505,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # 52-WEEK HIGH/LOW PROXIMITY
     # =========================================================================
-    print("  Computing 52-week high/low proximity...")
     high_52w = rolling_max(prices_arr, 252, min_count=252)
     low_52w = rolling_min(prices_arr, 252, min_count=252)
 
@@ -1528,7 +1519,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # BETA - Using optimized rolling covariance
     # =========================================================================
-    print("  Computing beta...")
     beta_63d_arr = None
     for beta_window in [21, 63, 126, 252]:
         # Beta = Cov(ETF, Core) / Var(Core)
@@ -1547,7 +1537,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # IDIOSYNCRATIC RETURN
     # =========================================================================
-    print("  Computing idiosyncratic return...")
     for idio_window in [21, 63, 126, 252]:
         beta_w_arr = get_signal(f'beta_{idio_window}d')
         idio_return_w = etf_returns_arr - (beta_w_arr * core_returns_arr[:, np.newaxis])
@@ -1561,7 +1550,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # VOLATILITY - Using fast rolling_std
     # =========================================================================
-    print("  Computing volatility...")
     for vol_window in [21, 63, 126, 252]:
         vol = rolling_std(etf_returns_arr, vol_window) * np.sqrt(252)
         result = store_and_yield(vol, f'vol_{vol_window}d')
@@ -1570,7 +1558,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # RELATIVE VOLATILITY
     # =========================================================================
-    print("  Computing relative volatility...")
     for rel_vol_window in [21, 63, 126, 252]:
         core_vol_w = rolling_std(core_returns_arr[:, np.newaxis], rel_vol_window) * np.sqrt(252)
         etf_vol_w = rolling_std(etf_returns_arr, rel_vol_window) * np.sqrt(252)
@@ -1587,7 +1574,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DRAWDOWN
     # =========================================================================
-    print("  Computing drawdown...")
     running_max = cummax_2d(prices_arr)
     drawdown = (prices_arr - running_max) / running_max
     result = store_and_yield(drawdown, 'drawdown')
@@ -1605,7 +1591,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DRAWDOWN DURATION
     # =========================================================================
-    print("  Computing drawdown duration...")
     dd_duration = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns, dtype=float)
     for col in etf_prices.columns:
         prices_col = etf_prices[col]
@@ -1631,7 +1616,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ULCER INDEX - FAST numba implementation
     # =========================================================================
-    print("  Computing Ulcer Index (numba)...")
     for window in [21, 63, 126, 252]:
         ulcer = rolling_ulcer_2d(etf_returns_arr, window)
         result = store_and_yield(ulcer, f'ulcer_index_{window}d')
@@ -1640,7 +1624,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CVaR - FAST numba implementation
     # =========================================================================
-    print("  Computing CVaR (numba)...")
     for window in [21, 63, 126, 252]:
         cvar = rolling_cvar_2d(etf_returns_arr, window, cutoff=0.05)
         result = store_and_yield(cvar, f'cvar_95_{window}d')
@@ -1649,7 +1632,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DOWNSIDE DEVIATION - FAST numba implementation
     # =========================================================================
-    print("  Computing Downside Deviation (numba)...")
     for window in [21, 63, 126, 252]:
         down_dev = rolling_downside_dev_2d(etf_returns_arr, window)
         result = store_and_yield(down_dev, f'downside_dev_{window}d')
@@ -1660,7 +1642,6 @@ def compute_signal_bases_generator(
     # Note: bottleneck std returns tiny values (~1e-12) instead of 0 for constant series,
     # which causes different NaN patterns. Using pandas ensures exact match.
     # =========================================================================
-    print("  Computing Sharpe ratio...")
     for window in [21, 63, 126, 252]:
         mean_ret = etf_returns.rolling(window).mean()
         std_ret = etf_returns.rolling(window).std()
@@ -1671,7 +1652,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # INFORMATION RATIO
     # =========================================================================
-    print("  Computing Information ratio...")
     for window in [21, 63, 126, 252]:
         mean_alpha = rolling_mean(alpha_arr, window)
         std_alpha = rolling_std(alpha_arr, window)
@@ -1682,7 +1662,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # SORTINO RATIO - FAST numba implementation
     # =========================================================================
-    print("  Computing Sortino ratio (numba)...")
     for window in [21, 63, 126, 252]:
         sortino = rolling_sortino_2d(etf_returns_arr, window)
         result = store_and_yield(sortino, f'sortino_{window}d')
@@ -1691,7 +1670,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CALMAR RATIO - using numba for speed
     # =========================================================================
-    print("  Computing Calmar ratio (numba)...")
     for window in [21, 63, 126, 252]:
         calmar = rolling_calmar_2d(etf_returns_arr, window)
         result = store_and_yield(calmar, f'calmar_{window}d')
@@ -1700,7 +1678,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # TREYNOR RATIO
     # =========================================================================
-    print("  Computing Treynor ratio...")
     for window in [21, 63, 126, 252]:
         rolling_ret = rolling_mean(etf_returns_arr, window) * 252
 
@@ -1716,7 +1693,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # OMEGA RATIO
     # =========================================================================
-    print("  Computing Omega ratio...")
     for window in [21, 63, 126, 252]:
         gains = np.clip(etf_returns_arr, 0, None)
         losses = np.clip(etf_returns_arr, None, 0)
@@ -1730,7 +1706,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # GAIN-TO-PAIN RATIO - ORIGINAL implementation (simple pandas rolling)
     # =========================================================================
-    print("  Computing Gain-to-Pain ratio (ORIGINAL)...")
     for window in [21, 63, 126, 252]:
         sum_returns = etf_returns.rolling(window).sum()
         losses = etf_returns.clip(upper=0).abs()
@@ -1743,7 +1718,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ULCER PERFORMANCE INDEX
     # =========================================================================
-    print("  Computing Ulcer Performance Index...")
     for window in [21, 63, 126, 252]:
         rolling_ret = rolling_mean(etf_returns_arr, window) * 252
         ulcer_arr = get_signal(f'ulcer_index_{window}d')
@@ -1755,7 +1729,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # RECOVERY FACTOR - FAST numba implementation
     # =========================================================================
-    print("  Computing Recovery Factor (numba)...")
     for window in [21, 63, 126, 252]:
         recovery_factor = rolling_recovery_factor_2d(etf_returns_arr, window)
         result = store_and_yield(recovery_factor, f'recovery_factor_{window}d')
@@ -1764,7 +1737,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # WIN/LOSS ANALYSIS
     # =========================================================================
-    print("  Computing Win/Loss Analysis...")
 
     # Win Rate
     for window in [21, 63, 126, 252]:
@@ -1774,14 +1746,12 @@ def compute_signal_bases_generator(
         if result: yield result
 
     # Payoff Ratio - using numba for speed (fixed to match original NaN logic)
-    print("  Computing Payoff Ratio (numba)...")
     for window in [21, 63, 126, 252]:
         payoff = rolling_payoff_2d(etf_returns_arr, window)
         result = store_and_yield(payoff, f'payoff_{window}d')
         if result: yield result
 
     # Profit Factor - ORIGINAL implementation (simple pandas rolling)
-    print("  Computing Profit Factor (ORIGINAL)...")
     for window in [21, 63, 126, 252]:
         gains = etf_returns.clip(lower=0)
         losses = etf_returns.clip(upper=0).abs()
@@ -1802,7 +1772,6 @@ def compute_signal_bases_generator(
         if result: yield result
 
     # Stability of Returns (numba)
-    print("  Computing Stability of Returns (numba)...")
     for window in [21, 63, 126, 252]:
         stability = rolling_stability_2d(etf_returns_arr, window)
         result = store_and_yield(stability, f'stability_{window}d')
@@ -1811,7 +1780,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # BETA-ADJUSTED RELATIVE STRENGTH
     # =========================================================================
-    print("  Computing beta-adjusted relative strength...")
     rs_252d_arr = get_signal('rs_252d')
     if rs_252d_arr is not None:
         for beta_window in [21, 63, 126, 252]:
@@ -1826,7 +1794,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # RATE OF CHANGE
     # =========================================================================
-    print("  Computing Rate of Change...")
     for period in [10, 20]:
         if period < n_time:
             # Use pandas pct_change for exact match with original
@@ -1853,7 +1820,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # TREND INDICATORS
     # =========================================================================
-    print("  Computing trend indicators...")
 
     # Price vs MA
     for ma_window in [20, 50, 100, 200]:
@@ -1878,7 +1844,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # MACD - Using ta library (same as original)
     # =========================================================================
-    print("  Computing MACD (using ta library)...")
     macd_line_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     macd_signal_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     macd_histogram_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
@@ -1901,7 +1866,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # RSI - Using ta library
     # =========================================================================
-    print("  Computing RSI (using ta library)...")
     rsi_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
         rsi_indicator = ta.momentum.RSIIndicator(etf_prices[col], window=14)
@@ -1914,7 +1878,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # BOLLINGER BANDS - Using ta library
     # =========================================================================
-    print("  Computing Bollinger Bands (using ta library)...")
     bb_reversion_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
         bb = ta.volatility.BollingerBands(etf_prices[col], window=20, window_dev=2)
@@ -1927,7 +1890,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CCI - Using ta library
     # =========================================================================
-    print("  Computing CCI (using ta library)...")
     cci_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
         cci_indicator = ta.trend.CCIIndicator(
@@ -1945,7 +1907,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # KST - Using ta library
     # =========================================================================
-    print("  Computing KST (using ta library)...")
     kst_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
         kst_indicator = ta.trend.KSTIndicator(etf_prices[col])
@@ -1957,7 +1918,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # STOCHASTIC OSCILLATOR - Using ta library
     # =========================================================================
-    print("  Computing Stochastic Oscillator (using ta library)...")
     stoch_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
         stoch_indicator = ta.momentum.StochasticOscillator(
@@ -1976,7 +1936,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # HIGHER MOMENTS - Using optimized rolling
     # =========================================================================
-    print("  Computing higher moments...")
 
     # Skewness
     for window in [21, 63, 126]:
@@ -1993,7 +1952,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CORRELATION WITH CORE
     # =========================================================================
-    print("  Computing correlation with core...")
     for window in [21, 63, 126, 252]:
         corr = rolling_corr_2d(etf_returns_arr, core_returns_arr, window)
         result = store_and_yield(corr, f'corr_core_{window}d')
@@ -2002,7 +1960,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # AUTOCORRELATION - Using optimized version
     # =========================================================================
-    print("  Computing autocorrelation...")
     for window in [21, 63, 126, 252]:
         for lag in [1, 5]:
             autocorr = rolling_autocorr_2d(etf_returns_arr, window, lag)
@@ -2012,7 +1969,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # HURST EXPONENT - FAST numba implementation
     # =========================================================================
-    print("  Computing Hurst exponent (numba)...")
     for window in [63, 126, 252]:
         hurst = rolling_hurst_2d(etf_returns_arr, window)
         result = store_and_yield(hurst, f'hurst_{window}d')
@@ -2021,7 +1977,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ENTROPY - FAST numba implementation
     # =========================================================================
-    print("  Computing entropy (numba)...")
     for window in [63, 126]:
         entropy = rolling_entropy_2d(etf_returns_arr, window)
         result = store_and_yield(entropy, f'entropy_{window}d')
@@ -2030,7 +1985,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # MOMENTUM DYNAMICS
     # =========================================================================
-    print("  Computing momentum dynamics...")
 
     rs_63d_arr = get_signal('rs_63d')
     if rs_63d_arr is not None:
@@ -2050,7 +2004,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # Z-SCORE SIGNALS
     # =========================================================================
-    print("  Computing z-score signals...")
 
     # Price z-scores - using pandas for exact NaN matching
     # (bottleneck std gives tiny values instead of 0 for constant series)
@@ -2097,7 +2050,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DISTANCE TO MA
     # =========================================================================
-    print("  Computing distance to MA signals...")
     for ma_window in [20, 50, 100, 200]:
         ma = rolling_mean(prices_arr, ma_window)
         dist_ma = -((prices_arr - ma) / ma)
@@ -2107,7 +2059,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # MACD VARIANTS
     # =========================================================================
-    print("  Computing MACD variants...")
 
     macd_line_arr = get_signal('macd_line')
     macd_normalized = (macd_line_arr / prices_arr) * 100
@@ -2132,7 +2083,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ADVANCED TREND INDICATORS
     # =========================================================================
-    print("  Computing advanced trend indicators...")
 
     # DPO
     dpo_period = 20
@@ -2185,7 +2135,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # OSCILLATORS & REVERSION
     # =========================================================================
-    print("  Computing oscillators and reversion signals...")
 
     stoch_arr = get_signal('stochastic')
     stoch_reversion = 50 - ((stoch_arr * 50) + 50)
@@ -2245,7 +2194,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DONCHIAN CHANNELS
     # =========================================================================
-    print("  Computing Donchian channels...")
     donchian_period = 20
     # Use min_count=donchian_period to match pandas default behavior
     don_high = rolling_max(prices_arr, donchian_period, min_count=donchian_period)
@@ -2263,7 +2211,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # DRAWDOWN-BASED REVERSION
     # =========================================================================
-    print("  Computing drawdown-based reversion signals...")
 
     dd_arr = get_signal('drawdown')
     dd_reversion = -dd_arr
@@ -2305,14 +2252,12 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CORRELATION & DISPERSION
     # =========================================================================
-    print("  Computing correlation and dispersion signals...")
 
     diversification = -corr_core_arr
     result = store_and_yield(diversification, 'diversification')
     if result: yield result
 
     # Market correlation - ORIGINAL implementation
-    print("    Computing market_corr (ORIGINAL)...")
     market_mean_ret = etf_returns.mean(axis=1)
     market_corr = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
     for col in etf_prices.columns:
@@ -2339,7 +2284,6 @@ def compute_signal_bases_generator(
     if result: yield result
 
     # Return dispersion - ORIGINAL implementation (cross-sectional std)
-    print("    Computing return_dispersion_63d (ORIGINAL)...")
     return_dispersion = etf_returns.std(axis=1)  # Cross-sectional std at each date
     dispersion_arr = np.tile(return_dispersion.values[:, np.newaxis], (1, n_etfs))
     result = store_and_yield(dispersion_arr, 'return_dispersion_63d')
@@ -2348,7 +2292,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # CAPTURE RATIOS - Using numba for speed (fixed to match original NaN logic)
     # =========================================================================
-    print("  Computing capture ratios (numba)...")
     core_returns_arr = core_returns.values
 
     for window in [21, 63, 126, 252]:
@@ -2368,7 +2311,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ADVANCED MOMENTUM DYNAMICS
     # =========================================================================
-    print("  Computing advanced momentum dynamics...")
 
     rs_126d_arr = get_signal('rs_126d')
     if rs_126d_arr is not None:
@@ -2445,7 +2387,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # REGIME INDICATORS
     # =========================================================================
-    print("  Computing regime indicators...")
 
     core_vol_63 = rolling_std(core_returns_arr[:, np.newaxis], 63)[:, 0] * np.sqrt(252)
     core_vol_mean = rolling_mean(core_vol_63[:, np.newaxis], 252)[:, 0]
@@ -2467,7 +2408,6 @@ def compute_signal_bases_generator(
     if result: yield result
 
     # Dispersion regime - ORIGINAL implementation (cross-sectional quantile)
-    print("    Computing dispersion_regime (ORIGINAL)...")
     dispersion_regime = etf_returns.quantile(0.8, axis=1) - etf_returns.quantile(0.2, axis=1)
     dispersion_regime_arr = np.tile(dispersion_regime.values[:, np.newaxis], (1, n_etfs))
     result = store_and_yield(dispersion_regime_arr, 'dispersion_regime')
@@ -2489,7 +2429,6 @@ def compute_signal_bases_generator(
     # =========================================================================
     # ADVANCED SEASONALITY
     # =========================================================================
-    print("  Computing advanced seasonality signals...")
 
     month = etf_prices.index.month.values
 
@@ -2539,14 +2478,41 @@ def compute_signal_bases_generator(
     # =========================================================================
     # SEASONALITY (month-of-year effects)
     # =========================================================================
-    print("  Computing seasonality...")
     for m in range(1, 13):
         month_signal = (month == m).astype(float)
         month_arr = np.tile(month_signal[:, np.newaxis], (1, n_etfs))
         result = store_and_yield(month_arr, f'month_{m}')
         if result: yield result
 
-    print(f"\nSignal computation complete (yielded {len(computed_signals)} signals)")
+
+def count_total_signals() -> int:
+    """
+    Count the total number of signals that will be computed.
+
+    Runs a minimal version of the generator to count yields efficiently.
+    Uses dummy data (small arrays) so counting is fast without computation overhead.
+
+    Returns:
+        Total number of signals that will be yielded
+    """
+    # Create minimal dummy price data (just enough to trigger the generator)
+    # Use very small arrays: 1000 time periods, 2 ETFs
+    dummy_prices = pd.DataFrame(
+        data=np.random.randn(1000, 2) + 100,
+        index=pd.date_range('2020-01-01', periods=1000),
+        columns=['ETF1', 'ETF2']
+    )
+    dummy_core = pd.Series(
+        data=np.random.randn(1000) + 100,
+        index=pd.date_range('2020-01-01', periods=1000)
+    )
+
+    # Count signals by iterating through generator
+    signal_count = 0
+    for signal_name, signal_data in compute_signal_bases_generator(dummy_prices, dummy_core):
+        signal_count += 1
+
+    return signal_count
 
 
 def compute_all_signal_bases(
