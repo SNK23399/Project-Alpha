@@ -36,6 +36,83 @@ from library_signal_indicators import compute_all_indicators_fast, compute_all_i
 # Output directories (relative to this script's location)
 SIGNAL_INPUT_DIR = Path(__file__).parent / 'data' / 'signals'
 FEATURE_OUTPUT_DIR = Path(__file__).parent / 'data' / 'features'
+DATA_DIR = Path(__file__).parent / 'data'
+
+# Configuration
+CORRELATION_THRESHOLD = 0.02
+
+# Global for correlation filtering
+ALPHA_DF = None
+DAILY_IR = None
+
+
+def check_feature_correlation_and_save(feature_data, filtered_name, output_path, alpha_df, daily_ir):
+    """
+    Check if feature passes correlation filter with forward IR before saving.
+
+    Args:
+        feature_data: Dict with keys ['dates', 'isins', 'features_3d', 'feature_names']
+        filtered_name: Name of filtered signal
+        output_path: Path to save pickle file
+        alpha_df: Forward IR DataFrame
+        daily_ir: Daily IR series (grouped mean)
+
+    Returns:
+        Tuple of (filtered_name, saved, error_msg, passed_filter)
+        - saved: True if feature was saved (passed filter)
+        - passed_filter: True if feature passed correlation threshold
+    """
+    if alpha_df is None or daily_ir is None:
+        # No filtering, just save
+        try:
+            with open(output_path, 'wb') as f:
+                pickle.dump(feature_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            return (filtered_name, True, None, True)
+        except Exception as e:
+            return (filtered_name, False, str(e), None)
+
+    try:
+        features_3d = feature_data['features_3d']  # (dates, isins, 25)
+
+        # Get common dates
+        dates_index = pd.DatetimeIndex(feature_data['dates'])
+        common_dates = dates_index.intersection(daily_ir.index)
+
+        if len(common_dates) < 2:
+            return (filtered_name, False, "Insufficient common dates", False)
+
+        # Get feature values for common dates (flatten across ISINs and features)
+        mask = dates_index.isin(common_dates)
+        feature_vals = features_3d[mask].flatten()
+
+        # Get IR values (repeat for same length)
+        ir_vals = np.repeat(daily_ir.loc[common_dates].values, features_3d.shape[1] * features_3d.shape[2])
+
+        # Ensure same length
+        min_len = min(len(feature_vals), len(ir_vals))
+        feature_vals = feature_vals[:min_len]
+        ir_vals = ir_vals[:min_len]
+
+        # Check for valid data
+        mask = ~(np.isnan(feature_vals) | np.isnan(ir_vals))
+        if mask.sum() < 2:
+            return (filtered_name, False, "Insufficient valid data", False)
+
+        # Compute correlation
+        correlation = float(np.corrcoef(feature_vals[mask], ir_vals[mask])[0, 1])
+
+        if abs(correlation) < CORRELATION_THRESHOLD:
+            # Feature doesn't pass filter - don't save
+            return (filtered_name, False, f"Correlation {correlation:.4f} < {CORRELATION_THRESHOLD}", False)
+
+        # Feature passed filter - save it
+        with open(output_path, 'wb') as f:
+            pickle.dump(feature_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        return (filtered_name, True, None, True)
+
+    except Exception as e:
+        return (filtered_name, False, str(e), None)
 
 
 def _save_feature_file(save_args):
@@ -171,15 +248,22 @@ def compute_and_save_features(
         }
 
         output_path = output_dir / f"{signal_name}__{filter_name}.pkl"
-        with open(output_path, 'wb') as f:
-            pickle.dump(feature_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        if verbose:
-            print(f"\nSaved to: {output_path}")
-            print(f"  File size: {output_path.stat().st_size / 1024**2:.1f} MB")
-            print(f"  Structure: dict with keys ['dates', 'isins', 'features_3d', 'feature_names']")
+        # Check correlation and save only if passes filter
+        _, saved, error_msg, _ = check_feature_correlation_and_save(
+            feature_data, filtered_name, output_path, ALPHA_DF, DAILY_IR
+        )
 
-        return (filtered_name, feature_data, None)
+        if saved:
+            if verbose:
+                print(f"\nSaved to: {output_path}")
+                print(f"  File size: {output_path.stat().st_size / 1024**2:.1f} MB")
+                print(f"  Structure: dict with keys ['dates', 'isins', 'features_3d', 'feature_names']")
+            return (filtered_name, feature_data, None)
+        else:
+            if verbose:
+                print(f"\nFeature filtered out: {error_msg}")
+            return (filtered_name, None, error_msg)
 
     except Exception as e:
         msg = str(e)
@@ -363,14 +447,29 @@ def compute_all_features():
     """
     Compute features for ALL filtered signals using multi-processing.
 
-    This processes all 7,325 filtered signals (293 signals × 25 filters)
-    and generates ~5.1 GB of feature files.
+    This processes all 7,325 filtered signals (293 signals × 25 filters),
+    filters by correlation with forward IR, and saves only passing features.
 
     Uses multi-processing to parallelize across CPU cores for 2-3x speedup.
     """
+    global ALPHA_DF, DAILY_IR
+
     print("=" * 80)
     print("BATCH FEATURE COMPUTATION - ALL FILTERED SIGNALS (MULTI-PROCESS)")
     print("=" * 80)
+
+    # Load forward IR for correlation filtering
+    print("\nLoading forward IR for correlation filtering...")
+    alpha_file = DATA_DIR / 'forward_alpha_1month.parquet'
+    if alpha_file.exists():
+        ALPHA_DF = pd.read_parquet(alpha_file)
+        ALPHA_DF['date'] = pd.to_datetime(ALPHA_DF['date'])
+        DAILY_IR = ALPHA_DF.groupby('date')['forward_ir'].mean()
+        DAILY_IR.index = pd.to_datetime(DAILY_IR.index)
+        print(f"  Loaded IR for {len(DAILY_IR)} dates")
+    else:
+        print(f"[WARNING] Forward IR not found: {alpha_file}")
+        print("  Features will be saved without correlation filtering")
 
     # Initialize database
     signal_db = SignalDatabase(SIGNAL_INPUT_DIR)
@@ -448,19 +547,26 @@ def compute_all_features():
 
     # Summary
     total_time = time.time() - start_time
+    saved_count = output_dir.glob("*.pkl")
+    saved_count = len(list(saved_count))
+
     print("\n" + "=" * 80)
     print("BATCH PROCESSING COMPLETE")
     print("=" * 80)
     print(f"\nTotal time: {total_time / 60:.1f} minutes")
     print(f"Time per signal: {total_time / len(signal_filter_pairs):.2f} seconds")
     print(f"Processed: {len(signal_filter_pairs)} signals")
-    print(f"Successful: {len(signal_filter_pairs) - len(errors)}")
+    print(f"Saved (passed filter): {saved_count}")
+    print(f"Filtered out: {len(signal_filter_pairs) - saved_count}")
     print(f"Errors: {len(errors)}")
 
     if use_gpu:
         print(f"Processing: GPU batched (10 signals per batch)")
     else:
         print(f"Processing: CPU multi-process ({n_processes} cores)")
+
+    if ALPHA_DF is not None:
+        print(f"Correlation filtering: |r| > {CORRELATION_THRESHOLD}")
 
     if errors:
         print("\nErrors encountered:")
@@ -469,7 +575,7 @@ def compute_all_features():
         if len(errors) > 10:
             print(f"  ... and {len(errors) - 10} more")
     else:
-        print("\nAll features computed successfully!")
+        print("\nAll features processed!")
 
 
 if __name__ == "__main__":
