@@ -1,20 +1,19 @@
 """
-Step 5: Precompute Feature Information Ratio Matrix
+Step 4: Precompute Feature Information Ratio Matrix
 ===================================================
 
-WALK-FORWARD PIPELINE - Step 5
+WALK-FORWARD PIPELINE - Step 4
 
 For each filtered signal (feature) at each date, evaluates: "If we selected
 top-N ETFs by this signal's ranking, what Information Ratio would we achieve?"
 
 Algorithm:
-1. Load forward_ir from Step 0 (forward alpha and IR per ETF per month)
-2. Load filtered signals from Step 2 (7,325 filtered signals)
+1. Load forward_ir from Step 1 (forward alpha and IR per ETF per month)
+2. Load filtered signals from Step 3 (ranked by correlation with forward IR)
 3. For each (date, filtered_signal, N):
    - Get rankings from filtered signal values (cross-sectional z-score)
    - Select top-N ETFs by this signal's ranking
    - Compute: signal_ir = mean(forward_ir[top_N_etfs])
-   - Record hit rate: 1 if mean_ir > 0, else 0
 4. Save 3D matrix for downstream analysis
 
 This matrix answers: "Which signals reliably predict good IR?"
@@ -22,12 +21,11 @@ This matrix answers: "Which signals reliably predict good IR?"
 Output:
     data/feature_ir_1month.npz
         feature_ir: (n_dates, n_signals, 10) - mean IR of top-N ETFs per signal
-        feature_hit: (n_dates, n_signals, 10) - hit rate (1 = positive IR)
         dates, features: signal names
         n_signals: count of filtered signals
 
 Usage:
-    python 5_precompute_feature_ir.py
+    python 4_precompute_feature_ir.py
 """
 
 import sys
@@ -85,20 +83,18 @@ if HAS_NUMBA:
         ir_matrix: np.ndarray,          # (n_dates, n_isins) - forward_ir values
         ir_valid_matrix: np.ndarray,    # (n_dates, n_isins) - float32 (1.0=valid, 0.0=invalid)
         n_satellites_max: int
-    ) -> tuple:
+    ) -> np.ndarray:
         """
         Numba-optimized parallel computation across all dates.
 
         For each (date, feature), selects top-N ETFs and computes their mean IR.
 
         Returns:
-            feature_ir: (n_dates, n_features, n_satellites_max)
-            feature_hit: (n_dates, n_features, n_satellites_max)
+            feature_ir: (n_dates, n_features, n_satellites_max) - mean IR for top-N ETFs
         """
         n_dates, n_isins, n_features = rankings.shape
 
         feature_ir = np.full((n_dates, n_features, n_satellites_max), np.nan, dtype=np.float32)
-        feature_hit = np.full((n_dates, n_features, n_satellites_max), np.nan, dtype=np.float32)
 
         # Parallel loop over dates
         for date_idx in prange(n_dates):
@@ -151,9 +147,8 @@ if HAS_NUMBA:
                     if ir_count > 0:
                         mean_ir = ir_sum / ir_count
                         feature_ir[date_idx, feat_idx, n] = np.float32(mean_ir)
-                        feature_hit[date_idx, feat_idx, n] = np.float32(1.0) if mean_ir > 0 else np.float32(0.0)
 
-        return feature_ir, feature_hit
+        return feature_ir
 
 else:
     # Fallback without numba
@@ -170,9 +165,8 @@ def _compute_all_dates_numpy(rankings, ir_matrix, ir_valid_matrix, n_satellites_
     n_dates, n_isins, n_features = rankings.shape
 
     feature_ir = np.full((n_dates, n_features, n_satellites_max), np.nan, dtype=np.float32)
-    feature_hit = np.full((n_dates, n_features, n_satellites_max), np.nan, dtype=np.float32)
 
-    for date_idx in tqdm(range(n_dates), desc="Processing dates"):
+    for date_idx in tqdm(range(n_dates), desc="Processing dates", ncols=120):
         rankings_date = rankings[date_idx]  # (n_isins, n_features)
         ir_date = ir_matrix[date_idx]       # (n_isins,)
         ir_valid = ir_valid_matrix[date_idx]  # (n_isins,)
@@ -204,9 +198,8 @@ def _compute_all_dates_numpy(rankings, ir_matrix, ir_valid_matrix, n_satellites_
                 if ir_count > 0:
                     mean_ir = ir_sum / ir_count
                     feature_ir[date_idx, feat_idx, n] = mean_ir
-                    feature_hit[date_idx, feat_idx, n] = 1.0 if mean_ir > 0 else 0.0
 
-    return feature_ir, feature_hit
+    return feature_ir
 
 
 # ============================================================
@@ -214,17 +207,17 @@ def _compute_all_dates_numpy(rankings, ir_matrix, ir_valid_matrix, n_satellites_
 # ============================================================
 
 def load_data(horizon):
-    """Load forward alpha/IR and pre-computed ranking matrix from Steps 0-2."""
+    """Load forward alpha/IR and pre-computed ranking matrix from Steps 1-3."""
     horizon_label = get_horizon_label(horizon)
 
-    print(f"\n{'='*60}")
-    print(f"LOADING DATA FROM STEPS 0-2")
-    print(f"{'='*60}")
+    print(f"\n{'='*120}")
+    print(f"LOADING DATA FROM STEPS 1-3")
+    print(f"{'='*120}")
 
     # Load forward alpha and IR
     alpha_file = OUTPUT_DIR / f'forward_alpha_{horizon_label}.parquet'
     if not alpha_file.exists():
-        raise FileNotFoundError(f"Forward alpha/IR not found: {alpha_file}\nRun Step 0 (0_compute_forward_ir.py) first.")
+        raise FileNotFoundError(f"Forward alpha/IR not found: {alpha_file}\nRun Step 1 (1_compute_forward_ir.py) first.")
 
     alpha_df = pd.read_parquet(alpha_file)
     alpha_df['date'] = pd.to_datetime(alpha_df['date'])
@@ -232,10 +225,10 @@ def load_data(horizon):
     print(f"\n[OK] Forward alpha/IR loaded ({len(alpha_df):,} observations)")
     print(f"     Columns: {', '.join(alpha_df.columns.tolist())}")
 
-    # Load pre-computed ranking matrix from Step 2
+    # Load pre-computed ranking matrix from Step 3
     rankings_file = OUTPUT_DIR / f'rankings_matrix_filtered_{horizon_label}.npz'
     if not rankings_file.exists():
-        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 2 (2_apply_filters.py) first to compute rankings.")
+        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 3 (3_apply_filters.py) first to compute rankings.")
 
     npz_data = np.load(rankings_file, allow_pickle=True)
     rankings = npz_data['rankings'].copy()
@@ -272,7 +265,7 @@ def prepare_ir_matrix(alpha_df, dates, isins):
     ir_matrix = np.full((n_dates, n_isins), np.nan, dtype=np.float32)
 
     # Fill matrix using vectorized operations
-    for date, group in tqdm(alpha_df.groupby('date'), desc="Building IR matrix", total=len(dates)):
+    for date, group in tqdm(alpha_df.groupby('date'), desc="Building IR matrix", total=len(dates), ncols=120):
         if date not in date_to_idx:
             continue
 
@@ -309,7 +302,6 @@ def precompute_feature_ir(alpha_df, rankings, dates, isins):
     For each filtered signal at each date (using pre-computed rankings):
     - Select top-N ETFs by ranking
     - Compute: signal_ir = mean(forward_ir[top_N_etfs])
-    - Record hit rate: 1 if mean_ir > 0, else 0
 
     Args:
         alpha_df: Forward IR DataFrame
@@ -319,11 +311,10 @@ def precompute_feature_ir(alpha_df, rankings, dates, isins):
 
     Returns:
         feature_ir: (n_dates, n_signals, N_SATELLITES_MAX) array
-        feature_hit: (n_dates, n_signals, N_SATELLITES_MAX) array
     """
-    print(f"\n{'='*60}")
-    print(f"STEP 5: PRECOMPUTING SIGNAL-IR MATRIX")
-    print(f"{'='*60}")
+    print(f"\n{'='*120}")
+    print(f"STEP 4: PRECOMPUTING SIGNAL-IR MATRIX")
+    print(f"{'='*120}")
 
     n_dates, n_isins, n_signals = rankings.shape
 
@@ -354,14 +345,14 @@ def precompute_feature_ir(alpha_df, rankings, dates, isins):
         )
 
         print("  Running parallel computation...")
-        feature_ir, feature_hit = _compute_all_dates_numba(
+        feature_ir = _compute_all_dates_numba(
             rankings.astype(np.float32),
             ir_matrix.astype(np.float32),
             ir_valid_float,
             N_SATELLITES_MAX
         )
     else:
-        feature_ir, feature_hit = _compute_all_dates_numpy(
+        feature_ir = _compute_all_dates_numpy(
             rankings,
             ir_matrix,
             ir_valid,
@@ -377,20 +368,18 @@ def precompute_feature_ir(alpha_df, rankings, dates, isins):
     print(f"  Non-NaN cells: {non_nan:,} / {total:,} ({coverage:.1f}%)")
     print(f"  Mean IR: {np.nanmean(feature_ir):.4f}")
     print(f"  IR range: {np.nanmin(feature_ir):.4f} to {np.nanmax(feature_ir):.4f}")
-    print(f"  Mean hit rate: {np.nanmean(feature_hit):.2%}")
 
-    return feature_ir, feature_hit
+    return feature_ir
 
 
-def save_feature_ir(feature_ir, feature_hit, dates, signal_names, horizon):
-    """Save the precomputed IR matrices from filtered signals."""
+def save_feature_ir(feature_ir, dates, signal_names, horizon):
+    """Save the precomputed IR matrix from filtered signals."""
     horizon_label = get_horizon_label(horizon)
     output_file = OUTPUT_DIR / f'feature_ir_{horizon_label}.npz'
 
     np.savez_compressed(
         output_file,
         feature_ir=feature_ir,
-        feature_hit=feature_hit,
         dates=dates,
         features=signal_names,
         n_satellites_max=N_SATELLITES_MAX,
@@ -408,12 +397,12 @@ def save_feature_ir(feature_ir, feature_hit, dates, signal_names, horizon):
 # ============================================================
 
 def main(horizon=HOLDING_MONTHS):
-    """Run Step 5: Precompute signal-IR matrix."""
+    """Run Step 4: Precompute signal-IR matrix."""
     horizon_label = get_horizon_label(horizon)
 
-    print("=" * 60)
-    print(f"STEP 5: PRECOMPUTE SIGNAL-IR MATRIX ({horizon_label.upper()})")
-    print("=" * 60)
+    print("=" * 120)
+    print(f"STEP 4: PRECOMPUTE SIGNAL-IR MATRIX ({horizon_label.upper()})")
+    print("=" * 120)
 
     output_file = OUTPUT_DIR / f'feature_ir_{horizon_label}.npz'
 
@@ -426,22 +415,20 @@ def main(horizon=HOLDING_MONTHS):
         print(f"\nExisting matrix shape: {data['feature_ir'].shape}")
         print(f"Signals: {data.get('n_signals', 'unknown')}")
         print(f"Mean IR: {np.nanmean(data['feature_ir']):.4f}")
-        print(f"Mean hit rate: {np.nanmean(data['feature_hit']):.2%}")
         return
 
-    # Load data from Steps 0-2
+    # Load data from Steps 1-3
     alpha_df, rankings, dates, isins, signal_names = load_data(horizon)
 
     # Precompute signal-IR matrix
-    feature_ir, feature_hit = precompute_feature_ir(alpha_df, rankings, dates, isins)
+    feature_ir = precompute_feature_ir(alpha_df, rankings, dates, isins)
 
     # Save
-    save_feature_ir(feature_ir, feature_hit, dates, signal_names, horizon)
+    save_feature_ir(feature_ir, dates, signal_names, horizon)
 
-    print("\n" + "=" * 60)
-    print("STEP 5 COMPLETE")
-    print("=" * 60)
-    print(f"\nNext step: Run Step 6 - 6_precompute_mc_hitrates_ir.py")
+    print("\n" + "=" * 120)
+    print("STEP 4 COMPLETE")
+    print("=" * 120)
 
 
 if __name__ == '__main__':

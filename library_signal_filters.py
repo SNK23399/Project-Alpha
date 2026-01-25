@@ -1971,7 +1971,7 @@ def compute_filtered_signals_optimized(
 
     # Create progress bar
     if show_progress and has_tqdm:
-        pbar = tqdm(total=total_work, desc="Filtering", unit="sig",
+        pbar = tqdm(total=total_work, desc="Filtering", unit="sig", ncols=120,
                    bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
     else:
         pbar = None

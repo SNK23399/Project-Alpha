@@ -1,5 +1,5 @@
 """
-Step 1: Compute Signal Bases
+Step 2: Compute Signal Bases
 ============================
 
 This script:
@@ -17,8 +17,8 @@ Outputs:
 - pipeline/data/signals/    Contains 293 parquet files (one per signal base)
 
 Usage:
-  python 1_compute_signal_bases.py                     # All data (2009-09-25 to today)
-  python 1_compute_signal_bases.py 2020-01-01 2024-12-31  # Custom date range
+  python 2_compute_signal_bases.py                     # All data (2009-09-25 to today)
+  python 2_compute_signal_bases.py 2020-01-01 2024-12-31  # Custom date range
 """
 
 import sys
@@ -42,12 +42,12 @@ from library_signal_bases import compute_signal_bases_generator, count_total_sig
 # Output directories
 PIPELINE_DIR = Path(__file__).parent
 SIGNAL_OUTPUT_DIR = PIPELINE_DIR / 'data' / 'signals'
-BACKUP_DIR = PIPELINE_DIR / 'backup' / '1_compute_signal_bases'
+BACKUP_DIR = PIPELINE_DIR / 'backup' / '2_compute_signal_bases'
 DATA_DIR = PIPELINE_DIR / 'data'
 
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
-CORRELATION_THRESHOLD = 0.1
+CORRELATION_THRESHOLD = 0.05
 
 
 def backup_signal_bases() -> str:
@@ -189,7 +189,7 @@ def compute_and_save_signal_bases(
         Dict with computation statistics
     """
     print("=" * 120)
-    print("STEP 1: COMPUTE SIGNAL BASES")
+    print("STEP 2: COMPUTE SIGNAL BASES")
     print("=" * 120)
 
     # Initialize databases (database is in maintenance/data folder)
@@ -282,7 +282,7 @@ def compute_and_save_signal_bases(
         print(f"  Ranking matrix initialized: {rankings.shape} (will trim after filtering)")
     else:
         print(f"  WARNING: Forward IR not found at {alpha_file}")
-        print("  Skipping ranking matrix creation. Run Step 0 first if needed.")
+        print("  Skipping ranking matrix creation. Run Step 1 first if needed.")
 
     # Compute signals one at a time and save immediately
     # Using tqdm to show progress with accurate total count
@@ -404,5 +404,3 @@ if __name__ == "__main__":
 
     if stats:
         print("\nSignal bases computed successfully!")
-        print("\nNext step:")
-        print("  python 2_apply_filters.py       # Apply filters to signal bases")

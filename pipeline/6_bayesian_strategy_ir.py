@@ -2,11 +2,11 @@
 Phase 4: Bayesian Strategy with Information Ratio Optimization
 ==============================================================
 
-INFORMATION RATIO OPTIMIZATION PROJECT - Step 8
+INFORMATION RATIO OPTIMIZATION PROJECT - Step 6
 
-- Uses mc_ir_mean_{N}month.npz (from step 6 - IR MC statistics)
+- Uses mc_ir_mean_{N}month.npz (from step 5 - IR MC statistics)
 - Optimizes INFORMATION RATIO for Bayesian feature selection
-- Processes all 7,618 features without pre-filtering
+- Processes all filtered features without pre-filtering
 
 Bayesian feature selection learned from MC-simulated Information Ratio statistics.
 
@@ -30,7 +30,7 @@ INFORMATION RATIO OPTIMIZATION:
   - Uses MC-estimated IR statistics for Bayesian feature selection
 
 Usage:
-    python bayesian_strategy_ir.py
+    python 6_bayesian_strategy_ir.py
 
 Output:
     data/backtest_results/bayesian_backtest_ir_summary.csv
@@ -473,25 +473,25 @@ def compute_feature_alphas_for_date(rankings, feature_indices, alpha_matrix,
 
 def load_data():
     """Load precomputed data from Steps 0, 2, and 6."""
-    print("=" * 60)
+    print("=" * 120)
     print("LOADING DATA FROM STEPS 0, 2, 6")
-    print("=" * 60)
+    print("=" * 120)
 
     horizon_label = f"{HOLDING_MONTHS}month"
 
-    # Load forward alpha (Step 0)
+    # Load forward alpha (Step 1)
     alpha_file = DATA_DIR / f'forward_alpha_{horizon_label}.parquet'
     if not alpha_file.exists():
-        raise FileNotFoundError(f"Forward alpha file not found: {alpha_file}\nRun Step 0 first.")
+        raise FileNotFoundError(f"Forward alpha file not found: {alpha_file}\nRun Step 1 first.")
 
     alpha_df = pd.read_parquet(alpha_file)
     alpha_df['date'] = pd.to_datetime(alpha_df['date'])
     print(f"  [OK] Forward alpha loaded")
 
-    # Load filtered ranking matrix (Step 2)
+    # Load filtered ranking matrix (Step 3)
     rankings_file = DATA_DIR / f'rankings_matrix_filtered_{horizon_label}.npz'
     if not rankings_file.exists():
-        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 2 first.")
+        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 3 first.")
 
     npz_data = np.load(rankings_file, allow_pickle=True)
     rankings = npz_data['rankings'].astype(np.float64)
@@ -500,14 +500,14 @@ def load_data():
     feature_names = list(npz_data['features'])
     print(f"  [OK] Ranking matrix loaded {rankings.shape}")
 
-    # Load MC IR statistics for priors (Step 6)
+    # Load MC IR statistics for priors (Step 5)
     mc_file = DATA_DIR / f'mc_ir_mean_{horizon_label}.npz'
     mc_data = None
     if mc_file.exists():
         mc_data = np.load(mc_file, allow_pickle=True)
-        print(f"  [OK] MC IR data loaded for priors (Step 6)")
+        print(f"  [OK] MC IR data loaded for priors (Step 5)")
     else:
-        print(f"  [WARN] No MC IR data (Step 6) - using uninformative priors")
+        print(f"  [WARN] No MC IR data (Step 5) - using uninformative priors")
 
     n_dates = len(dates)
     n_isins = len(isins)
@@ -575,7 +575,7 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
     # Load IR data from MC
     mc_ir_mean = mc_data['mc_ir_mean'][mc_idx]
     mc_ir_std = mc_data['mc_ir_std'][mc_idx]
-    mc_hitrates = mc_data['mc_hitrates'][mc_idx]
+    mc_hitrates = mc_data.get('mc_hitrates')  # Optional - may not be present in newer versions
     mc_candidate_mask = mc_data['candidate_masks'][mc_idx]
 
     for feat_idx in range(belief_state.n_features):
@@ -598,10 +598,13 @@ def initialize_beliefs_from_mc(belief_state: BeliefState, data: dict,
             if np.isnan(avg_ir_std) or avg_ir_std <= 0:
                 avg_ir_std = 0.03
 
-            hrs = [mc_hitrates[d, feat_idx] for d in valid_dates]
-            avg_hr = np.nanmean(hrs)
-            if np.isnan(avg_hr):
-                avg_hr = 0.5
+            # Hitrates are optional - only use if available
+            avg_hr = 0.5  # Default value if hitrates not available
+            if mc_hitrates is not None:
+                hrs = [mc_hitrates[mc_idx, d, feat_idx] for d in valid_dates]
+                avg_hr = np.nanmean(hrs)
+                if np.isnan(avg_hr):
+                    avg_hr = 0.5
 
             if USE_STABILITY_IN_PRIOR and len(valid_dates) >= 3:
                 # Compute stability factor based on IR values
@@ -811,7 +814,7 @@ def walk_forward_backtest(data: dict, n_satellites: int,
 
     iterator = range(test_start_idx, len(dates))
     if show_progress:
-        iterator = tqdm(iterator, desc=f"N={n_satellites}")
+        iterator = tqdm(iterator, desc=f"N={n_satellites}", ncols=120)
 
     for test_idx in iterator:
         test_date = dates[test_idx]
@@ -984,9 +987,9 @@ def print_hp_evolution(hp_diagnostics: List[dict], n_satellites: int):
 
 def main():
     """Run Bayesian strategy backtest with 2 learned hyperparameters."""
-    print("=" * 70)
+    print("=" * 120)
     print("BAYESIAN STRATEGY WITH LEARNED HYPERPARAMETERS (2 total)")
-    print("=" * 70)
+    print("=" * 120)
     print(f"\nConfiguration:")
     print(f"  Holding period: {HOLDING_MONTHS} month")
     print(f"  N values to test: {N_SATELLITES_TO_TEST}")
@@ -1007,9 +1010,9 @@ def main():
     start_time = time.time()
 
     for test_num, n in enumerate(N_SATELLITES_TO_TEST, 1):
-        print(f"\n{'='*70}")
+        print(f"\n{'='*120}")
         print(f"TEST {test_num}/{len(N_SATELLITES_TO_TEST)}: N={n}")
-        print(f"{'='*70}")
+        print(f"{'='*120}")
 
         results_df, hp_diagnostics = walk_forward_backtest(data, n, show_progress=True)
 
@@ -1041,9 +1044,9 @@ def main():
     elapsed = time.time() - start_time
 
     # Print summary
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 120)
     print("SUMMARY - BAYESIAN STRATEGY WITH 2 LEARNED HYPERPARAMETERS")
-    print("=" * 70)
+    print("=" * 120)
     print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
 
     if len(all_stats) > 0:

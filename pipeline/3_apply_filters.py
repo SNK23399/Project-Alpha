@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Step 2: Apply Filters to Signal Bases
+Step 3: Apply Filters to Signal Bases
 ======================================
 
 This script applies smoothing filters to the computed signal bases.
@@ -9,7 +9,7 @@ to create a comprehensive set of filtered signals for downstream analysis.
 
 Features:
 - FULL recomputation: Always recomputes from scratch to ensure fresh data
-- Automatic backup: Old filtered signals are backed up to backup/2_apply_filters/YYYY_MM_DD/
+- Automatic backup: Old filtered signals are backed up to backup/3_apply_filters/YYYY_MM_DD/
 - GPU acceleration: Uses GPU if available for filter calculations
 
 Output:
@@ -17,8 +17,8 @@ Output:
     Each file is named {base_signal}__{filter_name}.parquet
 
 Usage:
-  python 2_apply_filters.py                # All filters, full recomputation with automatic backup
-  python 2_apply_filters.py --filters ema_21d,ema_63d  # Specific filters with automatic backup
+  python 3_apply_filters.py                # All filters, full recomputation with automatic backup
+  python 3_apply_filters.py --filters ema_21d,ema_63d  # Specific filters with automatic backup
 """
 
 import sys
@@ -56,19 +56,19 @@ from library_signal_filters import (
 # Output directories
 PIPELINE_DIR = Path(__file__).parent
 SIGNAL_OUTPUT_DIR = PIPELINE_DIR / 'data' / 'signals'
-BACKUP_DIR = PIPELINE_DIR / 'backup' / '2_apply_filters'
+BACKUP_DIR = PIPELINE_DIR / 'backup' / '3_apply_filters'
 DATA_DIR = PIPELINE_DIR / 'data'
 
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
-CORRELATION_THRESHOLD = 0.1
+CORRELATION_THRESHOLD = 0.05
 
 
 def backup_filtered_signals() -> str:
     """
     Backup current filtered signals to dated folder.
 
-    Creates: backup/2_apply_filters/YYYY_MM_DD/
+    Creates: backup/3_apply_filters/YYYY_MM_DD/
 
     Returns:
         Path to backup directory, or None if no signals to backup
@@ -271,9 +271,9 @@ def main():
     """Main entry point for filter application."""
     args = parse_args()
 
-    print("=" * 80)
-    print("STEP 2: APPLY FILTERS TO SIGNAL BASES")
-    print("=" * 80)
+    print("=" * 120)
+    print("STEP 3: APPLY FILTERS TO SIGNAL BASES")
+    print("=" * 120)
 
     # Initialize database
     signal_db = SignalDatabase(SIGNAL_OUTPUT_DIR)
@@ -283,7 +283,7 @@ def main():
 
     if not base_signal_names:
         print("\nERROR: No base signals found!")
-        print("Please run step 1 first: python 1_compute_signal_bases.py")
+        print("Please run step 2 first: python 2_compute_signal_bases.py")
         return 1
 
     print(f"\nFound {len(base_signal_names)} base signals")
@@ -309,7 +309,7 @@ def main():
     # Always recompute all filtered signals from scratch
     filtered_dir = signal_db.filtered_dir
     if filtered_dir.exists():
-        shutil.rmtree(filtered_dir)
+        shutil.rmtree(filtered_dir, ignore_errors=True)
     filtered_dir.mkdir(parents=True, exist_ok=True)
 
     # Calculate totals
@@ -374,7 +374,7 @@ def main():
         stats_lock = Lock()  # For thread-safe list operations
     else:
         print(f"  WARNING: Forward IR not found at {alpha_file}")
-        print("  Skipping ranking matrix creation. Run Step 0 first if needed.")
+        print("  Skipping ranking matrix creation. Run Step 1 first if needed.")
 
     # Set up parallel saving
     print("\nApplying filters with batch processing...")
@@ -423,9 +423,9 @@ def main():
         if len(stats['errors']) > 5:
             print(f"  ... and {len(stats['errors']) - 5} more")
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 120)
     print("FILTER APPLICATION COMPLETE")
-    print("=" * 80)
+    print("=" * 120)
     print(f"  Signals: {stats['count']} | Records: {stats['records']:,}")
     print(f"  Time: {elapsed:.1f}s ({elapsed/60:.1f} min) | Throughput: {stats['count']/elapsed:.1f} signals/sec")
 
@@ -436,7 +436,7 @@ def main():
         total_files = len(list(filtered_dir.glob("*.parquet")))
         print(f"  Storage: {total_size/1e9:.2f} GB ({total_files} files)")
 
-    print("=" * 80)
+    print("=" * 120)
 
     # Save ranking matrix (computed inline during filter application)
     if rankings is not None and len(kept_signal_names) > 0:
@@ -466,9 +466,9 @@ def main():
     elif len(kept_signal_names) == 0:
         print("\nNo signals passed correlation filter for ranking matrix")
 
-    print("=" * 80)
-    print("STEP 2 COMPLETE")
-    print("=" * 80)
+    print("=" * 120)
+    print("STEP 3 COMPLETE")
+    print("=" * 120)
 
     return 0
 

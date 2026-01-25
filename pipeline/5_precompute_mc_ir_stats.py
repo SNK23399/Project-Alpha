@@ -2,17 +2,16 @@
 Phase 3: Precompute Monte Carlo Information Ratio Statistics (Walk-Forward Pipeline)
 ====================================================================================
 
-INFORMATION RATIO OPTIMIZATION PROJECT - Step 6
+INFORMATION RATIO OPTIMIZATION PROJECT - Step 5
 
-- Uses feature_ir_{N}month.npz (from step 5 - IR computation)
+- Uses feature_ir_{N}month.npz (from step 4 - Feature IR computation)
 - Computes IR STATISTICS from MC simulations
-- Processes ALL 7,618 features WITHOUT pre-filtering (true Bayesian approach)
+- Processes ALL filtered features WITHOUT pre-filtering (true Bayesian approach)
 
-For each feature at each test date, runs 5M (configurable) Monte Carlo
+For each feature at each test date, runs 1M (configurable) Monte Carlo
 simulations to estimate:
 - IR mean (average Information Ratio from MC)
 - IR standard deviation (uncertainty in IR)
-- Hit rate (probability of positive IR)
 
 These statistics enable true Bayesian learning where:
 - Features start with weak priors
@@ -20,16 +19,18 @@ These statistics enable true Bayesian learning where:
 - Even initially poor features can be reconsidered if they improve
 - Allows discovery of features that were dormant but become relevant
 
-MC_SAMPLES_PER_MONTH = 5_000_000 (configurable for tighter/looser CIs)
+NOTE: Only IR mean/std are computed as they are the only statistics used in
+Step 6 (Bayesian strategy).
+
+MC_SAMPLES_PER_MONTH = 1_000_000 (configurable for tighter/looser CIs)
 
 Output:
     data/mc_ir_mean_{holding_months}month.npz
         mc_ir_mean: MC-estimated IR for each feature/date/N
         mc_ir_std: Uncertainty in IR estimates
-        mc_hitrates: Hit rate (% positive IR)
 
 Usage:
-    python 6_precompute_mc_hitrates_ir.py
+    python 5_precompute_mc_ir_stats.py
 """
 
 import sys
@@ -87,7 +88,7 @@ DATA_DIR = Path(__file__).parent / 'data'
 # ============================================================
 
 @njit(cache=True, parallel=True)
-def evaluate_all_features_all_dates(feature_ir, feature_hit, n_satellites, test_start_idx, n_dates):
+def evaluate_all_features_all_dates(feature_ir, n_satellites, test_start_idx, n_dates):
     """
     Evaluate all features for ALL test dates at once.
 
@@ -101,7 +102,6 @@ def evaluate_all_features_all_dates(feature_ir, feature_hit, n_satellites, test_
 
     all_avg_irs = np.empty((n_test_dates, n_features), dtype=np.float64)
     all_ir_stds = np.empty((n_test_dates, n_features), dtype=np.float64)
-    all_hit_rates = np.empty((n_test_dates, n_features), dtype=np.float64)
 
     decay_rate = np.log(2) / DECAY_HALF_LIFE_MONTHS
 
@@ -111,7 +111,6 @@ def evaluate_all_features_all_dates(feature_ir, feature_hit, n_satellites, test_
         for feat_idx in range(n_features):
             sum_ir = 0.0
             sum_ir_sq = 0.0
-            sum_hit = 0.0
             sum_weight = 0.0
             count = 0
 
@@ -119,18 +118,15 @@ def evaluate_all_features_all_dates(feature_ir, feature_hit, n_satellites, test_
                 months_ago = test_idx - i
                 weight = np.exp(-decay_rate * months_ago)
                 ir = feature_ir[i, feat_idx, n_satellites - 1]
-                hit = feature_hit[i, feat_idx, n_satellites - 1]
                 if not np.isnan(ir):
                     sum_ir += ir * weight
                     sum_ir_sq += (ir ** 2) * weight
-                    sum_hit += hit * weight
                     sum_weight += weight
                     count += 1
 
             if sum_weight > 0:
                 avg_ir = sum_ir / sum_weight
                 all_avg_irs[test_offset, feat_idx] = avg_ir
-                all_hit_rates[test_offset, feat_idx] = sum_hit / sum_weight
 
                 # Compute IR standard deviation (uncertainty in IR)
                 if count > 1:
@@ -146,18 +142,17 @@ def evaluate_all_features_all_dates(feature_ir, feature_hit, n_satellites, test_
             else:
                 all_avg_irs[test_offset, feat_idx] = -999.0
                 all_ir_stds[test_offset, feat_idx] = 0.01
-                all_hit_rates[test_offset, feat_idx] = -999.0
 
-    return all_avg_irs, all_ir_stds, all_hit_rates
+    return all_avg_irs, all_ir_stds
 
 
 @njit(cache=True)
-def aggregate_batch_numba(alphas, hits, ensemble_indices, ensemble_sizes,
+def aggregate_batch_numba(alphas, ensemble_indices, ensemble_sizes,
                           candidate_offsets, sample_to_job, all_candidates,
-                          hit_counts, total_counts, alpha_sums, alpha_sq_sums):
+                          total_counts, alpha_sums, alpha_sq_sums):
     """
     Numba-accelerated aggregation of MC batch results.
-    Accumulates into existing arrays for hit rates AND alpha statistics.
+    Accumulates alpha statistics (mean and variance).
 
     Note: Not using parallel=True because we're updating shared arrays
     and need atomic-like behavior. The GPU kernel is the parallel part.
@@ -171,7 +166,6 @@ def aggregate_batch_numba(alphas, hits, ensemble_indices, ensemble_sizes,
 
         job_idx = sample_to_job[i]
         alpha_val = alphas[i]
-        is_hit = hits[i] > 0
         ens_size = ensemble_sizes[i]
 
         cand_start = candidate_offsets[job_idx]
@@ -188,10 +182,8 @@ def aggregate_batch_numba(alphas, hits, ensemble_indices, ensemble_sizes,
             feat_idx = all_candidates[global_cand_idx]
 
             total_counts[job_idx, feat_idx] += 1
-            if is_hit:
-                hit_counts[job_idx, feat_idx] += 1
 
-            # Track alpha statistics (for t-test later)
+            # Track alpha statistics (for mean and std)
             alpha_sums[job_idx, feat_idx] += alpha_val
             alpha_sq_sums[job_idx, feat_idx] += alpha_val * alpha_val
 
@@ -213,8 +205,7 @@ if GPU_AVAILABLE:
         sample_to_job,       # (total_samples,)
         job_train_ends,      # (n_jobs,)
         n_satellites,
-        out_alphas,
-        out_hits
+        out_alphas
     ):
         sample_idx = cuda.grid(1)
         if sample_idx >= ensemble_sizes.shape[0]:
@@ -228,7 +219,6 @@ if GPU_AVAILABLE:
 
         if n_cands < 2:
             out_alphas[sample_idx] = math.nan
-            out_hits[sample_idx] = 0
             return
 
         n_isins = rankings.shape[1]
@@ -284,7 +274,6 @@ if GPU_AVAILABLE:
 
             if best_idx < 0:
                 out_alphas[sample_idx] = math.nan
-                out_hits[sample_idx] = 0
                 return
 
             selected[k] = best_idx
@@ -293,11 +282,9 @@ if GPU_AVAILABLE:
 
         if best_count == 0:
             out_alphas[sample_idx] = math.nan
-            out_hits[sample_idx] = 0
         else:
             avg_alpha = best_alpha_sum / best_count
             out_alphas[sample_idx] = avg_alpha
-            out_hits[sample_idx] = 1 if avg_alpha > 0 else 0
 
 
 # ============================================================
@@ -305,25 +292,32 @@ if GPU_AVAILABLE:
 # ============================================================
 
 def load_data():
-    """Load precomputed data from Steps 0, 2, and 5."""
-    print("=" * 60)
-    print("LOADING DATA FROM STEPS 0, 2, 5")
-    print("=" * 60)
+    """
+    Load precomputed data from Steps 1, 3, and 4.
+
+    Returns data needed for MC IR prior computation:
+    - forward alpha (Step 1) for ground truth IR values
+    - ranking matrix (Step 3) for feature evaluation
+    - feature IR statistics (Step 4) for historical feature performance
+    """
+    print("=" * 120)
+    print("LOADING DATA FROM STEPS 1, 3, 4")
+    print("=" * 120)
 
     horizon_label = f"{HOLDING_MONTHS}month"
 
-    # Load forward alpha (Step 0)
+    # Load forward alpha (Step 1)
     alpha_file = DATA_DIR / f'forward_alpha_{horizon_label}.parquet'
     if not alpha_file.exists():
-        raise FileNotFoundError(f"Forward alpha not found: {alpha_file}\nRun Step 0 first.")
+        raise FileNotFoundError(f"Forward alpha not found: {alpha_file}\nRun Step 1 first.")
     alpha_df = pd.read_parquet(alpha_file)
     alpha_df['date'] = pd.to_datetime(alpha_df['date'])
     print(f"[OK] Forward alpha loaded")
 
-    # Load ranking matrix from filtered signals (Step 2)
+    # Load ranking matrix from filtered signals (Step 3)
     rankings_file = DATA_DIR / f'rankings_matrix_filtered_{horizon_label}.npz'
     if not rankings_file.exists():
-        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 2 first.")
+        raise FileNotFoundError(f"Ranking matrix not found: {rankings_file}\nRun Step 3 first.")
     npz_data = np.load(rankings_file, allow_pickle=True)
     rankings = npz_data['rankings'].astype(np.float64)
     dates = pd.to_datetime(npz_data['dates'])
@@ -331,13 +325,12 @@ def load_data():
     feature_names = list(npz_data['features'])
     print(f"[OK] Ranking matrix loaded {rankings.shape}")
 
-    # Load feature IR statistics (Step 5)
+    # Load feature IR statistics (Step 4)
     feature_ir_file = DATA_DIR / f'feature_ir_{horizon_label}.npz'
     if not feature_ir_file.exists():
-        raise FileNotFoundError(f"Feature IR not found: {feature_ir_file}\nRun Step 5 first.")
+        raise FileNotFoundError(f"Feature IR not found: {feature_ir_file}\nRun Step 4 first.")
     fs_data = np.load(feature_ir_file, allow_pickle=True)
     feature_ir = fs_data['feature_ir'].astype(np.float64)
-    feature_hit = fs_data['feature_hit'].astype(np.float64)
     print(f"[OK] Feature IR loaded {feature_ir.shape}")
 
     n_dates, n_isins = len(dates), len(isins)
@@ -367,8 +360,7 @@ def load_data():
         'dates': dates,
         'isins': isins,
         'feature_names': feature_names,
-        'feature_ir': feature_ir,
-        'feature_hit': feature_hit
+        'feature_ir': feature_ir
     }
 
 
@@ -387,13 +379,12 @@ def precompute_candidates_all_dates(data, n_satellites, test_start_idx):
     Features with negative IR can still be used (inverted).
     """
     feature_ir = data['feature_ir']
-    feature_hit = data['feature_hit']
     n_dates = len(data['dates'])
     n_features = feature_ir.shape[1]
     n_test_dates = n_dates - test_start_idx
 
-    all_avg_irs, all_ir_stds, all_hit_rates = evaluate_all_features_all_dates(
-        feature_ir, feature_hit, n_satellites, test_start_idx, n_dates
+    all_avg_irs, all_ir_stds = evaluate_all_features_all_dates(
+        feature_ir, n_satellites, test_start_idx, n_dates
     )
 
     # ALL features are candidates (no pre-filtering)
@@ -452,8 +443,6 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     total_samples = sum(samples_per_job)
     if total_samples == 0:
         return (np.full((n_test_dates, n_features), np.nan, dtype=np.float32),
-                np.zeros((n_test_dates, n_features), dtype=np.int32),
-                np.full((n_test_dates, n_features), np.nan, dtype=np.float32),
                 np.full((n_test_dates, n_features), np.nan, dtype=np.float32))
 
     if not GPU_AVAILABLE:
@@ -468,7 +457,6 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     n_batches = (total_samples + BATCH_SIZE - 1) // BATCH_SIZE
 
     # Accumulate results across batches
-    hit_counts = np.zeros((n_jobs, n_features), dtype=np.int64)
     total_counts = np.zeros((n_jobs, n_features), dtype=np.int64)
     alpha_sums = np.zeros((n_jobs, n_features), dtype=np.float64)
     alpha_sq_sums = np.zeros((n_jobs, n_features), dtype=np.float64)
@@ -510,7 +498,6 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
         sample_to_job_gpu = cp.asarray(sample_to_job_batch, dtype=cp.int64)
 
         out_alphas = cp.zeros(batch_samples, dtype=cp.float64)
-        out_hits = cp.zeros(batch_samples, dtype=cp.int32)
 
         # Launch kernel
         threads = GPU_BLOCK_SIZE
@@ -521,21 +508,20 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
             candidate_indices_gpu, candidate_offsets_gpu,
             ensemble_indices_gpu, ensemble_sizes_gpu,
             sample_to_job_gpu, job_train_ends_gpu,
-            n_satellites, out_alphas, out_hits
+            n_satellites, out_alphas
         )
         cuda.synchronize()
 
         # Transfer back
         alphas_np = cp.asnumpy(out_alphas)
-        hits_np = cp.asnumpy(out_hits)
         ensemble_indices_np = cp.asnumpy(ensemble_indices_gpu)
         ensemble_sizes_np = cp.asnumpy(ensemble_sizes_gpu)
 
         # Aggregate this batch using Numba (fast)
         aggregate_batch_numba(
-            alphas_np, hits_np, ensemble_indices_np, ensemble_sizes_np,
+            alphas_np, ensemble_indices_np, ensemble_sizes_np,
             candidate_offsets, sample_to_job_batch, all_candidates,
-            hit_counts, total_counts, alpha_sums, alpha_sq_sums
+            total_counts, alpha_sums, alpha_sq_sums
         )
 
     # Cleanup GPU memory
@@ -543,18 +529,14 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     del candidate_indices_gpu, candidate_offsets_gpu, job_train_ends_gpu
     cp.get_default_memory_pool().free_all_blocks()
 
-    # Compute final hit rates and IR statistics
-    mc_hitrates = np.full((n_test_dates, n_features), np.nan, dtype=np.float32)
-    mc_samples = np.zeros((n_test_dates, n_features), dtype=np.int32)
+    # Compute final IR statistics (IR mean and std)
     mc_ir_mean = np.full((n_test_dates, n_features), np.nan, dtype=np.float32)
     mc_ir_std = np.full((n_test_dates, n_features), np.nan, dtype=np.float32)
 
     for job_idx in range(n_jobs):
         for feat_idx in range(n_features):
             total = total_counts[job_idx, feat_idx]
-            mc_samples[job_idx, feat_idx] = total
             if total >= MC_MIN_SAMPLES:
-                mc_hitrates[job_idx, feat_idx] = hit_counts[job_idx, feat_idx] / total
                 # IR mean
                 mean_ir = alpha_sums[job_idx, feat_idx] / total
                 mc_ir_mean[job_idx, feat_idx] = mean_ir
@@ -564,14 +546,15 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
                     # Ensure non-negative due to numerical precision
                     mc_ir_std[job_idx, feat_idx] = np.sqrt(max(0, variance))
 
-    return mc_hitrates, mc_samples, mc_ir_mean, mc_ir_std
+    return mc_ir_mean, mc_ir_std
 
 
-def precompute_all_mc_hitrates(data):
+def precompute_all_mc_ir_stats(data):
     """
     Precompute MC IR statistics for all (date, N) combinations.
 
-    Runs Monte Carlo simulations to estimate IR distribution parameters.
+    Runs Monte Carlo simulations to estimate IR mean and standard deviation.
+    Note: Hitrate computation removed - only IR statistics are computed.
     """
     dates = data['dates']
     feature_names = data['feature_names']
@@ -582,86 +565,69 @@ def precompute_all_mc_hitrates(data):
     test_start_idx = np.where(dates >= min_train_date)[0][0]
     n_test_dates = n_dates - test_start_idx
 
-    print(f"\n{'='*60}")
-    print("PRECOMPUTING MC HIT RATES AND IR STATISTICS")
-    print(f"{'='*60}")
+    print(f"\n{'='*120}")
+    print("PRECOMPUTING MC INFORMATION RATIO STATISTICS")
+    print(f"{'='*120}")
     print(f"Test dates: {n_test_dates}, N values: {len(N_SATELLITES_TO_PRECOMPUTE)}")
 
-    mc_hitrates = {}
-    mc_samples = {}
     mc_ir_means = {}
     mc_ir_stds = {}
     candidate_masks = {}
     inverted_masks = {}
     stats_summary = []
 
-    for n_satellites in tqdm(N_SATELLITES_TO_PRECOMPUTE, desc="N values"):
+    for n_satellites in tqdm(N_SATELLITES_TO_PRECOMPUTE, desc="N values", ncols=120):
         # Step 1: Find candidates
         cand_mask, inv_mask = precompute_candidates_all_dates(data, n_satellites, test_start_idx)
 
-        # Step 2: Run MC (returns IR stats from feature_ir input)
-        mc_hr, mc_samp, mc_ir_mean, mc_ir_std = run_mc_for_n(
+        # Step 2: Run MC (returns IR mean and std only)
+        mc_ir_mean, mc_ir_std = run_mc_for_n(
             data, n_satellites, test_start_idx, cand_mask, inv_mask
         )
 
         # Store (expand to full date range)
-        full_mc = np.full((n_dates, n_features), np.nan, dtype=np.float32)
-        full_samp = np.zeros((n_dates, n_features), dtype=np.int32)
         full_ir_mean = np.full((n_dates, n_features), np.nan, dtype=np.float32)
         full_ir_std = np.full((n_dates, n_features), np.nan, dtype=np.float32)
         full_cand = np.zeros((n_dates, n_features), dtype=np.bool_)
         full_inv = np.zeros((n_dates, n_features), dtype=np.bool_)
 
-        full_mc[test_start_idx:] = mc_hr
-        full_samp[test_start_idx:] = mc_samp
         full_ir_mean[test_start_idx:] = mc_ir_mean
         full_ir_std[test_start_idx:] = mc_ir_std
         full_cand[test_start_idx:] = cand_mask
         full_inv[test_start_idx:] = inv_mask
 
-        mc_hitrates[n_satellites] = full_mc
-        mc_samples[n_satellites] = full_samp
         mc_ir_means[n_satellites] = full_ir_mean
         mc_ir_stds[n_satellites] = full_ir_std
         candidate_masks[n_satellites] = full_cand
         inverted_masks[n_satellites] = full_inv
 
         # Collect stats for printing at the end
-        valid_hr = mc_hr[~np.isnan(mc_hr)]
-        valid_samp = mc_samp[mc_samp > 0]
         valid_ir = mc_ir_mean[~np.isnan(mc_ir_mean)]
-        if len(valid_hr) > 0:
+        if len(valid_ir) > 0:
             stats_summary.append((
                 n_satellites,
-                valid_hr.mean(), valid_hr.min(), valid_hr.max(),
-                valid_samp.mean(), valid_samp.min(), valid_samp.max(),
                 valid_ir.mean(), valid_ir.min(), valid_ir.max()
             ))
 
     # Print summary after progress bar completes
-    print("\nStatistics per N:")
+    print("\nIR Statistics per N:")
     for stats in stats_summary:
-        (n_sat, mean_hr, min_hr, max_hr,
-         mean_samp, min_samp, max_samp,
-         mean_ir, min_ir, max_ir) = stats
-        print(f"  N={n_sat}: HR={mean_hr:.1%} [{min_hr:.1%}, {max_hr:.1%}], "
-              f"IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}], "
-              f"samples={mean_samp:.0f}")
+        (n_sat, mean_ir, min_ir, max_ir) = stats
+        print(f"  N={n_sat}: IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}]")
 
-    return mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks, test_start_idx
+    return mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks, test_start_idx
 
 
-def save_mc_hitrates(mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
-                     candidate_masks, inverted_masks, test_start_idx, dates, feature_names):
+def save_mc_ir_stats(mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks,
+                     test_start_idx, dates, feature_names):
     """
     Save MC IR statistics for Bayesian belief setting.
 
     Saves Information Ratio mean/std estimates for each feature at each test date.
+    Note: Hitrates are no longer computed.
     """
     output_file = DATA_DIR / f'mc_ir_mean_{HOLDING_MONTHS}month.npz'
 
-    mc_hitrates_arr = np.stack([mc_hitrates[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
-    mc_samples_arr = np.stack([mc_samples[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
     mc_ir_mean_arr = np.stack([mc_ir_means[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
     mc_ir_std_arr = np.stack([mc_ir_stds[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
     candidate_masks_arr = np.stack([candidate_masks[n] for n in N_SATELLITES_TO_PRECOMPUTE], axis=0)
@@ -669,8 +635,6 @@ def save_mc_hitrates(mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
 
     np.savez_compressed(
         output_file,
-        mc_hitrates=mc_hitrates_arr,
-        mc_samples=mc_samples_arr,
         mc_ir_mean=mc_ir_mean_arr,
         mc_ir_std=mc_ir_std_arr,
         candidate_masks=candidate_masks_arr,
@@ -694,9 +658,9 @@ def save_mc_hitrates(mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
 
 
 def main():
-    print("=" * 60)
-    print("STEP 6: PRECOMPUTE MC INFORMATION RATIO STATISTICS")
-    print("=" * 60)
+    print("=" * 120)
+    print("STEP 5: PRECOMPUTE MC INFORMATION RATIO STATISTICS")
+    print("=" * 120)
 
     output_file = DATA_DIR / f'mc_ir_mean_{HOLDING_MONTHS}month.npz'
     if output_file.exists() and not FORCE_RECOMPUTE:
@@ -719,23 +683,22 @@ def main():
     # Warmup numba JIT
     print("\nWarming up Numba JIT compiler...")
     _ = evaluate_all_features_all_dates(
-        data['feature_ir'][:20], data['feature_hit'][:20], 1, 10, 20
+        data['feature_ir'][:20], 1, 10, 20
     )
 
     start_time = time.time()
-    (mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
-     candidate_masks, inverted_masks, test_start_idx) = precompute_all_mc_hitrates(data)
+    (mc_ir_means, mc_ir_stds,
+     candidate_masks, inverted_masks, test_start_idx) = precompute_all_mc_ir_stats(data)
     elapsed = time.time() - start_time
 
-    save_mc_hitrates(mc_hitrates, mc_samples, mc_ir_means, mc_ir_stds,
+    save_mc_ir_stats(mc_ir_means, mc_ir_stds,
                      candidate_masks, inverted_masks, test_start_idx,
                      data['dates'], data['feature_names'])
 
-    print(f"\n{'='*60}")
-    print("STEP 6 COMPLETE")
-    print(f"{'='*60}")
+    print(f"\n{'='*120}")
+    print("STEP 5 COMPLETE")
+    print(f"{'='*120}")
     print(f"Total time: {elapsed:.1f}s ({elapsed/60:.1f} min)")
-    print(f"\nNext step: Run Step 7 - bayesian_strategy_ir.py")
 
     return 0
 

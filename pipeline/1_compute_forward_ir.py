@@ -1,5 +1,5 @@
 """
-STEP 0: Compute Forward Alpha and Information Ratio
+STEP 1: Compute Forward Alpha and Information Ratio
 ====================================================
 
 FIRST STEP IN PIPELINE - Runs independently from signal computation
@@ -12,16 +12,17 @@ Computes forward IR directly from ETF prices:
    - True IR metric that consolidates alpha, consistency, and risk
 
 This is the target variable used by subsequent steps:
-- Scripts 1-2: Generate signals (signal bases, filters)
-- Script 3: Computes features and filters them by correlation with forward IR
-- Script 4: Creates rankings matrix using filtered features
+- Steps 2-3: Generate signals (signal bases, filters)
+- Step 4: Precomputes feature IR (for each feature, what IR would be achieved)
+- Step 5: Computes MC statistics (Bayesian priors from historical IR distribution)
+- Step 6: Bayesian satellite selection using the learned patterns
 
 Output:
     data/forward_alpha_1month.parquet
         Columns: date, isin, forward_return, core_return, forward_alpha, forward_ir
 
 Usage:
-    python 0_compute_forward_ir.py
+    python 1_compute_forward_ir.py
 """
 
 import sys
@@ -156,9 +157,9 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
     horizon_value, horizon_unit = parse_horizon(horizon)
     horizon_label = get_horizon_label(horizon)
 
-    print(f"\n{'='*80}")
-    print(f"STEP 0: COMPUTE FORWARD IR ({horizon_label.upper()} HORIZON)")
-    print(f"{'='*80}")
+    print(f"\n{'='*120}")
+    print(f"STEP 1: COMPUTE FORWARD IR ({horizon_label.upper()} HORIZON)")
+    print(f"{'='*120}")
     print(f"\nTarget variable for feature correlation filtering and backtesting")
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -191,7 +192,7 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
 
     with ThreadPoolExecutor(max_workers=N_THREADS) as executor:
         futures = {executor.submit(load_single_etf, args): args[0] for args in args_list}
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Loading prices"):
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Loading prices", ncols=120):
             isin, price_series = future.result()
             if price_series is not None:
                 prices[isin] = price_series
@@ -378,10 +379,10 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
 # ============================================================
 
 def main():
-    """Run Step 0: Compute forward IR."""
-    print("=" * 80)
-    print("STEP 0: FORWARD IR COMPUTATION")
-    print("=" * 80)
+    """Run Step 1: Compute forward IR."""
+    print("=" * 120)
+    print("STEP 1: FORWARD IR COMPUTATION")
+    print("=" * 120)
     print("\nThis is the FIRST STEP in the pipeline.")
     print("It computes forward IR directly from ETF prices.")
     print("Subsequent steps will use this as the target variable.")
@@ -391,17 +392,9 @@ def main():
     # Compute forward IR
     alpha_df = compute_forward_ir(HOLDING_MONTHS)
 
-    print("\n" + "=" * 80)
-    print("STEP 0 COMPLETE")
-    print("=" * 80)
-    print(f"\nNext steps:")
-    print(f"  1. python 1_compute_signal_bases.py      # Signal bases")
-    print(f"  2. python 2_apply_filters.py             # Filtered signals")
-    print(f"  3. python 3_compute_features.py          # Features (filtered by forward IR)")
-    print(f"  4. python 4_create_rankings_matrix.py    # Ranking matrix")
-    print(f"  5. python 5_precompute_feature_ir.py     # Feature IR statistics")
-    print(f"  6. python 6_precompute_mc_hitrates.py    # MC simulations")
-    print(f"  7. python bayesian_strategy.py           # Satellite selection")
+    print("\n" + "=" * 120)
+    print("STEP 1 COMPLETE")
+    print("=" * 120)
 
 
 if __name__ == '__main__':
