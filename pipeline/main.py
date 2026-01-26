@@ -1,30 +1,36 @@
 """
-Walk-Forward Satellite Selection Pipeline - Main Orchestrator
-=============================================================
+Core-Satellite Portfolio Pipeline - Main Orchestrator
+=====================================================
 
-Runs complete pipeline to predict which N ETFs to select based on walk-forward backtesting.
+Runs complete pipeline for satellite selection + adaptive allocation weighting.
 
 Workflow:
-  1 Compute forward alpha and information ratio (target variable)
-  2 Compute all signal bases (with automatic backup)
-  3 Apply all filters (with automatic backup)
-  4 Precompute feature-IR matrix (signal predictions)
-  5 Precompute MC Information Ratio statistics (Bayesian priors)
-  6 Run Bayesian satellite selection (final backtest)
-
-Note: Step 3 (features) is skipped due to disk space constraints
+  1. Compute forward alpha and information ratio (target variable)
+  2. Compute all signal bases (with automatic backup)
+  3. Apply all filters (with automatic backup)
+  4. Precompute feature-IR matrix (signal predictions)
+  5. Precompute MC Information Ratio statistics (Bayesian priors)
+  6. Run Bayesian satellite selection (STAGE 6: which satellites)
+  7. Discover allocation hyperparameters (STAGE 7)
+  8. Discover allocation weights via MC (STAGE 8: how to weight satellites)
+  9. Build integrated portfolio (STAGE 9: combined selection + allocation)
 
 Usage:
   python main.py                           # All steps, full pipeline
   python main.py --month YYYY-MM           # All steps, specific period
   python main.py --steps 1,2,3,4,5,6       # Run specific steps (comma-separated)
-  python main.py --only-step 4             # Run only one step
+  python main.py --only-step 6             # Run only one step
 
 Examples:
-  python main.py --month 2024-02           # Run all steps
-  python main.py --steps 2,3               # Run only steps 2 & 3
-  python main.py --month 2024-02 --steps 4,5,6  # Run only downstream steps for Feb 2024
-  python main.py --only-step 1             # Run only step 1
+  python main.py                           # Run full pipeline
+  python main.py --steps 6,8,9             # Satellite selection + allocation
+  python main.py --only-step 6             # Only select satellites
+  python main.py --only-step 8             # Only discover allocation
+  python main.py --only-step 9             # Only build portfolio
+
+Output:
+  data/backtest_results/portfolio_with_allocation.csv - Final portfolio spec
+  data/backtest_results/allocation_summary.csv        - Summary statistics
 """
 
 import sys

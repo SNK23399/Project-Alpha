@@ -14,7 +14,7 @@ Expected performance:
 - CPU fallback (Numba JIT): ~1.6 sec per filtered signal = 3+ hours total
 
 Usage:
-    from library_signal_indicators import compute_all_indicators_fast
+    from library.signal_indicators import compute_all_indicators_fast
 
     features = compute_all_indicators_fast(signals_2d)
     # Returns (n_time, n_etfs, 25) array - computed on GPU if available, CPU fallback

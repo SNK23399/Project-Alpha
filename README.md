@@ -29,35 +29,36 @@ pip install pandas numpy scipy matplotlib tqdm justetf-scraping degiro-connector
 
 ```
 Core Satellite/
-├── Data Pipeline
-│   ├── 1_compute_signal_bases.py     # Compute 293 raw signals
-│   ├── 2_apply_filters.py            # Apply 25 smoothing filters
-│   └── 3_compute_features.py         # Combine into ML features
+├── Data Pipeline (pipeline/)
+│   ├── 1_compute_forward_ir.py           # Compute target variable (forward alpha)
+│   ├── 2_compute_signal_bases.py         # Compute 293 raw signals
+│   ├── 3_apply_filters.py                # Apply 25 smoothing filters
+│   ├── 4_precompute_feature_ir.py        # Compute feature-IR matrix
+│   ├── 5_precompute_mc_ir_stats.py       # Compute Bayesian priors
+│   ├── 6_bayesian_strategy_ir.py         # Bayesian satellite selection (equal-weighted)
+│   ├── 7_rule_parameter_discovery.py     # Test portfolio rule parameters (100k MC)
+│   ├── 8_adaptive_allocation_predictor.py # Predict core/satellite weights
+│   ├── models/                           # Trained allocation prediction models
+│   └── main.py                           # Orchestrate full pipeline
 │
-├── Signal Libraries
-│   ├── library_signal_bases.py       # Signal computation (parallelized)
-│   ├── library_signal_filters.py     # Filter definitions (Numba-accelerated)
-│   └── signal_indicators.py          # Indicator transformations
+├── Signal Libraries (library/)
+│   ├── signal_bases.py               # Signal computation (parallelized, 293 signals)
+│   ├── signal_filters.py             # Filter definitions (Numba-accelerated, 25 filters)
+│   ├── signal_indicators.py          # Cross-sectional feature transformations
+│   └── __init__.py                   # Package exports
 │
-├── Testing & Validation
-│   ├── test_signal_correctness.py    # Signal correctness tests
-│   └── validate_filtered_signals.py  # Filtered signal validation
+├── Support Modules (support/)
+│   ├── backtester.py                 # Backtesting engine
+│   ├── degiro_client.py              # DEGIRO API client
+│   ├── etf_database.py               # ETF data storage (SQLite)
+│   ├── etf_fetcher.py                # ETF catalog fetching
+│   ├── price_fetcher.py              # Price data fetching
+│   └── signal_database.py            # Signal data storage (Parquet)
 │
-├── Analysis
-│   └── ensemble_discovery.py         # Ensemble model discovery
-│
-├── Maintenance (Database Updates)
-│   ├── maintenance/1_collect_etf_data.py      # Fetch ETF data
-│   ├── maintenance/2_compare_databases.py     # Validate and replace database
-│   └── maintenance/3_analyze_data_quality.py  # Data quality analysis
-│
-├── Support Modules
-│   ├── support/backtester.py         # Backtesting engine
-│   ├── support/degiro_client.py      # DEGIRO API client
-│   ├── support/etf_database.py       # ETF data storage (SQLite)
-│   ├── support/etf_fetcher.py        # ETF catalog fetching
-│   ├── support/price_fetcher.py      # Price data fetching
-│   └── support/signal_database.py    # Signal data storage (Parquet)
+├── Maintenance (maintenance/)
+│   ├── 1_collect_etf_data.py         # Fetch ETF data
+│   ├── 2_compare_databases.py        # Validate and replace database
+│   └── 3_analyze_data_quality.py     # Data quality analysis
 │
 └── Documentation
     ├── README.md                     # This file
@@ -111,13 +112,45 @@ Applies 25 smoothing/transformation filters to each signal:
 - Rate of change
 - Regime switching detection
 
-### 4. Compute Features
+### 4. Satellite Selection
 
 ```bash
-python 3_compute_features.py
+cd pipeline
+python 6_bayesian_strategy_ir.py
 ```
 
-Combines filtered signals into ML-ready features for prediction.
+Runs monthly Bayesian satellite selection with equal-weighted allocation:
+- Selects 3-7 ETFs per month based on predicted Information Ratio
+- Uses Bayesian feature selection with learned hyperparameters (decay, prior strength)
+- Satellites equally weighted (equal-weighting outperforms IR-score weighting)
+- Walk-forward validation with expanding training window
+- Learns feature beliefs from historical alpha data
+
+### 5. Portfolio Rule Parameter Discovery
+
+```bash
+python 7_rule_parameter_discovery.py
+```
+
+Tests 100,000 Monte Carlo portfolio rule combinations:
+- Evaluates 5 rule parameters (core_weight, rebalance_threshold, etc.)
+- Identifies which parameters significantly affect Information Ratio
+- Discovers that only core_weight matters (correlation: -0.39)
+- Output: parameter sensitivity analysis and optimal distributions
+
+### 6. Predict Allocation
+
+```bash
+python 8_adaptive_allocation_predictor.py
+```
+
+Trains predictive models for optimal portfolio allocation:
+- **Phase 1 (Training)**: Learns from 464 months of historical Stage 6 selections
+- **Phase 2 (Prediction)**: Predicts optimal allocation for any new satellite selection:
+  - Optimal core/satellite split (R² = 0.973)
+  - Individual satellite weights within satellite allocation (R² = 0.620)
+- Models saved to: `pipeline/models/`
+- Usage: `predictor.predict(selected_isins, alpha_df, target_date)`
 
 ## Core Concepts
 
@@ -125,6 +158,9 @@ Combines filtered signals into ML-ready features for prediction.
 
 - **Core**: iShares Core MSCI World (IE00B4L5Y983) - Global diversification
 - **Satellites**: Regional/thematic ETFs for tactical allocation
+- **Satellite Allocation**: Equal weighting across selected satellites
+  - Tested IR-score weighting and score² weighting, both showed negligible improvement
+  - Equal weighting is simpler and equally effective for selected universe
 
 ### Signal-Based Alpha Generation
 
@@ -142,6 +178,20 @@ The system generates alpha predictions through:
 
 - Better: +0.5% alpha 80% of the time
 - Worse: +3% alpha 50% of the time
+
+### Satellite Allocation Strategy
+
+**Key Finding**: Equal weighting of selected satellites is optimal.
+
+Tested three allocation strategies for selected satellites:
+1. **Equal weight** (Stage 6): Baseline approach
+2. **IR-score weight**: Weight by selection score (negligible improvement: +0.03%)
+3. **Score² weight**: Squared weighting for concentration (negligible improvement: +0.04%)
+
+**Result**: All approaches perform virtually identically, suggesting:
+- The satellite selection (which ETFs to pick) is the critical factor
+- How those satellites are weighted has minimal impact once selected
+- **Decision**: Use equal weighting for simplicity and interpretability
 
 ## Signal Categories
 
@@ -172,11 +222,13 @@ python 2_compare_databases.py
 # 3. Analyze data quality
 python 3_analyze_data_quality.py
 
-# 4. Recompute signals (incremental)
-cd ..
-python 1_compute_signal_bases.py incremental
-python 2_apply_filters.py
-python 3_compute_features.py
+# 4. Recompute signals and run satellite selection
+cd ../pipeline
+python 2_compute_signal_bases.py incremental
+python 3_apply_filters.py
+python 4_precompute_feature_ir.py
+python 5_precompute_mc_ir_stats.py
+python 6_bayesian_strategy_ir.py
 ```
 
 ## Configuration

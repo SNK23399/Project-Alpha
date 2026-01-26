@@ -47,7 +47,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from support.signal_database import SignalDatabase
-from library_signal_filters import (
+from library.signal_filters import (
     compute_filtered_signals_optimized,
     get_available_filters,
     GPU_AVAILABLE

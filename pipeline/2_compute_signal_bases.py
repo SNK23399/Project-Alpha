@@ -37,7 +37,7 @@ sys.path.insert(0, str(project_root))
 
 from support.etf_database import ETFDatabase
 from support.signal_database import SignalDatabase
-from library_signal_bases import compute_signal_bases_generator, count_total_signals
+from library.signal_bases import compute_signal_bases_generator, count_total_signals
 
 # Output directories
 PIPELINE_DIR = Path(__file__).parent
