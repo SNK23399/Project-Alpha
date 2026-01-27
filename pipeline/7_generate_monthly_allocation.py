@@ -1,5 +1,5 @@
 """
-Monthly Portfolio Allocation Generator - Stage 9
+Monthly Portfolio Allocation Generator - Stage 7
 ================================================
 
 Generates actionable buy orders for a 60/40 core-satellite portfolio.
@@ -22,7 +22,7 @@ Algorithm:
   5. Output actionable buy orders
 
 Usage:
-    python 9_generate_monthly_allocation.py
+    python 7_generate_monthly_allocation.py
 
 Output:
     data/allocation/allocation_YYYYMMDD_HHMMSS.csv

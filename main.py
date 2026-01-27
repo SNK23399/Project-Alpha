@@ -11,29 +11,28 @@ Workflow:
   4. Precompute feature-IR matrix (signal predictions)
   5. Precompute MC Information Ratio statistics (Bayesian priors)
   6. Run Bayesian satellite selection (select satellites for the month)
-  7. [Future: Discover allocation hyperparameters]
-  8. [Future: Discover allocation weights via MC]
-  9. Generate monthly portfolio allocation (buy orders for 60/40 split)
+  7. Generate monthly portfolio allocation (buy orders for 60/40 split)
+  8. [Future: Discover allocation hyperparameters]
+  9. [Future: Discover allocation weights via MC]
 
 Usage:
   python main.py                           # All steps (1,2,3,4,5,6)
   python main.py --steps 1,2,3,4,5,6       # Run specific steps (comma-separated)
   python main.py --only-step 6             # Run only one step
-  python main.py --only-step 9             # Run only allocation generation
+  python main.py --only-step 7             # Run only allocation generation
 
 Examples:
   python main.py                           # Run full pipeline (signals + selection)
   python main.py --steps 4,5,6             # Skip to satellite selection
   python main.py --only-step 6             # Only select satellites
-  python main.py --only-step 9             # Generate monthly allocation (interactive)
+  python main.py --only-step 7             # Generate monthly allocation (interactive)
 
 Output:
   Stage 6: data/backtest_results/bayesian_backtest_N*.csv    - Satellite selections
-  Stage 9: data/allocation/allocation_YYYYMMDD_HHMMSS.csv    - Buy orders for portfolio
+  Stage 7: data/allocation/allocation_YYYYMMDD_HHMMSS.csv    - Buy orders for portfolio
 """
 
 import sys
-import json
 import subprocess
 from pathlib import Path
 from datetime import datetime
@@ -346,12 +345,12 @@ class WalkForwardSatelliteSelectionPipeline:
             raise
 
     # ========================================================================
-    # STEP 9: Generate Monthly Portfolio Allocation
+    # STEP 7: Generate Monthly Portfolio Allocation
     # ========================================================================
 
-    def step_9_generate_monthly_allocation(self) -> dict:
+    def step_7_generate_monthly_allocation(self) -> dict:
         """
-        Step 9: Generate Monthly Portfolio Allocation
+        Step 7: Generate Monthly Portfolio Allocation
 
         Takes user budget and generates actionable buy orders based on
         the latest satellite selections from Stage 6.
@@ -362,7 +361,7 @@ class WalkForwardSatelliteSelectionPipeline:
         self.print_header("Generate Monthly Portfolio Allocation", "9")
 
         try:
-            script_path = self.pipeline_dir / '9_generate_monthly_allocation.py'
+            script_path = self.pipeline_dir / '7_generate_monthly_allocation.py'
 
             if not script_path.exists():
                 raise FileNotFoundError(f"Script not found: {script_path}")
@@ -396,9 +395,9 @@ class WalkForwardSatelliteSelectionPipeline:
         Execute the pipeline (selected steps or all steps).
 
         Args:
-            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6', '9']).
+            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6', '7']).
                    If None, execute all steps in order: ['1', '2', '3', '4', '5', '6']
-                   Step 9 (allocation) is optional and runs interactively when specified.
+                   Step 7 (allocation) is optional and runs interactively when specified.
 
         Returns:
             Dictionary with all results
@@ -415,7 +414,7 @@ class WalkForwardSatelliteSelectionPipeline:
             '4': self.step_4_precompute_feature_ir,
             '5': self.step_5_precompute_mc_ir_stats,
             '6': self.step_6_bayesian_strategy,
-            '9': self.step_9_generate_monthly_allocation,
+            '7': self.step_7_generate_monthly_allocation,
         }
 
         # Validate requested steps
@@ -460,8 +459,8 @@ Examples:
   python main.py --steps 2,3               # Only steps 2 & 3
   python main.py --steps 4,5,6             # Feature-IR through backtest
   python main.py --only-step 6             # Only step 6 (satellite selection)
-  python main.py --only-step 9             # Only step 9 (generate allocation - interactive)
-  python main.py --steps 1,2,3,4,5,6,9     # Full pipeline + allocation
+  python main.py --only-step 7             # Only step 7 (generate allocation - interactive)
+  python main.py --steps 1,2,3,4,5,6,7     # Full pipeline + allocation
         """
     )
 
@@ -476,7 +475,7 @@ Examples:
         '--only-step',
         type=str,
         default=None,
-        help='Run only this step (e.g., "4"). Shorthand for --steps'
+        help='Run only this step (e.g., "7"). Shorthand for --steps'
     )
 
     args = parser.parse_args()
@@ -493,17 +492,6 @@ Examples:
     pipeline = WalkForwardSatelliteSelectionPipeline()
 
     results = pipeline.run(steps=steps_to_run)
-
-    # Save results to JSON
-    output_dir = Path(__file__).parent / 'pipeline' / 'results'
-    output_dir.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_file = output_dir / f"pipeline_{timestamp}.json"
-
-    with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
-
-    print(f"\nResults saved to: {output_file}")
 
     return results
 
