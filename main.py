@@ -10,27 +10,26 @@ Workflow:
   3. Apply all filters (with automatic backup)
   4. Precompute feature-IR matrix (signal predictions)
   5. Precompute MC Information Ratio statistics (Bayesian priors)
-  6. Run Bayesian satellite selection (STAGE 6: which satellites)
-  7. Discover allocation hyperparameters (STAGE 7)
-  8. Discover allocation weights via MC (STAGE 8: how to weight satellites)
-  9. Build integrated portfolio (STAGE 9: combined selection + allocation)
+  6. Run Bayesian satellite selection (select satellites for the month)
+  7. [Future: Discover allocation hyperparameters]
+  8. [Future: Discover allocation weights via MC]
+  9. Generate monthly portfolio allocation (buy orders for 60/40 split)
 
 Usage:
-  python main.py                           # All steps, full pipeline
-  python main.py --month YYYY-MM           # All steps, specific period
+  python main.py                           # All steps (1,2,3,4,5,6)
   python main.py --steps 1,2,3,4,5,6       # Run specific steps (comma-separated)
   python main.py --only-step 6             # Run only one step
+  python main.py --only-step 9             # Run only allocation generation
 
 Examples:
-  python main.py                           # Run full pipeline
-  python main.py --steps 6,8,9             # Satellite selection + allocation
+  python main.py                           # Run full pipeline (signals + selection)
+  python main.py --steps 4,5,6             # Skip to satellite selection
   python main.py --only-step 6             # Only select satellites
-  python main.py --only-step 8             # Only discover allocation
-  python main.py --only-step 9             # Only build portfolio
+  python main.py --only-step 9             # Generate monthly allocation (interactive)
 
 Output:
-  data/backtest_results/portfolio_with_allocation.csv - Final portfolio spec
-  data/backtest_results/allocation_summary.csv        - Summary statistics
+  Stage 6: data/backtest_results/bayesian_backtest_N*.csv    - Satellite selections
+  Stage 9: data/allocation/allocation_YYYYMMDD_HHMMSS.csv    - Buy orders for portfolio
 """
 
 import sys
@@ -52,8 +51,8 @@ class WalkForwardSatelliteSelectionPipeline:
 
     def __init__(self):
         """Initialize pipeline."""
-        self.pipeline_dir = Path(__file__).parent
-        self.core_satellite_dir = self.pipeline_dir.parent
+        self.pipeline_dir = Path(__file__).parent / 'pipeline'
+        self.core_satellite_dir = Path(__file__).parent
 
         # Results storage
         self.results = {
@@ -346,18 +345,65 @@ class WalkForwardSatelliteSelectionPipeline:
             print(f"\n  [ERROR] in step 7: {str(e)}")
             raise
 
+    # ========================================================================
+    # STEP 9: Generate Monthly Portfolio Allocation
+    # ========================================================================
+
+    def step_9_generate_monthly_allocation(self) -> dict:
+        """
+        Step 9: Generate Monthly Portfolio Allocation
+
+        Takes user budget and generates actionable buy orders based on
+        the latest satellite selections from Stage 6.
+
+        Creates a 60/40 core-satellite portfolio with integer quantities
+        and minimal uninvested cash.
+        """
+        self.print_header("Generate Monthly Portfolio Allocation", "9")
+
+        try:
+            script_path = self.pipeline_dir / '9_generate_monthly_allocation.py'
+
+            if not script_path.exists():
+                raise FileNotFoundError(f"Script not found: {script_path}")
+
+            print(f"\n  Generating portfolio allocation...")
+            print(f"  - Reads latest satellite selections from Stage 6")
+            print(f"  - Calculates optimal buy orders for 60/40 split")
+            print(f"  - Minimizes uninvested cash")
+            print(f"  - Output: CSV with buy orders (ISIN, quantity, price, total)")
+
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(self.pipeline_dir),
+                capture_output=False,
+                check=False
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Allocation generation failed with code {result.returncode}")
+
+            self.print_progress("Monthly allocation generated successfully")
+
+            return {'status': 'completed'}
+
+        except Exception as e:
+            print(f"\n  [ERROR] in step 9: {str(e)}")
+            raise
+
     def run(self, steps: list = None) -> dict:
         """
         Execute the pipeline (selected steps or all steps).
 
         Args:
-            steps: List of step names to execute (e.g., ['0', '1', '2', '5', '6', '7']).
-                   If None, execute all steps in order: ['0', '1', '2', '5', '6', '7']
+            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6', '9']).
+                   If None, execute all steps in order: ['1', '2', '3', '4', '5', '6']
+                   Step 9 (allocation) is optional and runs interactively when specified.
 
         Returns:
             Dictionary with all results
         """
-        # Default to all steps if none specified
+        # Default to steps 1-6 if none specified (allocation requires user input)
         if steps is None:
             steps = ['1', '2', '3', '4', '5', '6']
 
@@ -369,6 +415,7 @@ class WalkForwardSatelliteSelectionPipeline:
             '4': self.step_4_precompute_feature_ir,
             '5': self.step_5_precompute_mc_ir_stats,
             '6': self.step_6_bayesian_strategy,
+            '9': self.step_9_generate_monthly_allocation,
         }
 
         # Validate requested steps
@@ -409,11 +456,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                           # All steps (1,2,3,4,5,6)
+  python main.py                           # All steps (1,2,3,4,5,6) - full pipeline
   python main.py --steps 2,3               # Only steps 2 & 3
-  python main.py --steps 4,5,6             # Only downstream steps (feature-IR through backtest)
-  python main.py --only-step 1             # Only step 1 (forward IR)
-  python main.py --only-step 5             # Only step 5 (MC IR statistics)
+  python main.py --steps 4,5,6             # Feature-IR through backtest
+  python main.py --only-step 6             # Only step 6 (satellite selection)
+  python main.py --only-step 9             # Only step 9 (generate allocation - interactive)
+  python main.py --steps 1,2,3,4,5,6,9     # Full pipeline + allocation
         """
     )
 
@@ -447,7 +495,7 @@ Examples:
     results = pipeline.run(steps=steps_to_run)
 
     # Save results to JSON
-    output_dir = Path(__file__).parent / 'results'
+    output_dir = Path(__file__).parent / 'pipeline' / 'results'
     output_dir.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     output_file = output_dir / f"pipeline_{timestamp}.json"
