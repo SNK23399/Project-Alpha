@@ -79,7 +79,7 @@ MC_MIN_SAMPLES = 100
 GPU_BLOCK_SIZE = 256
 
 # Force recompute (set to True to regenerate files)
-FORCE_RECOMPUTE = False
+FORCE_RECOMPUTE = True
 DATA_DIR = Path(__file__).parent / 'data'
 
 

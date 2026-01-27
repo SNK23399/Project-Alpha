@@ -55,11 +55,16 @@ HOLDING_MONTHS = 1
 # Minimum price history required (1 year)
 MIN_HISTORY_DAYS = 252
 
+# Minimum AUM (Fund Size) to reduce survivor bias
+# ETFs below this threshold are more likely to be delisted
+# This filters to only ETFs with stable funding and realistic trading universe
+MIN_AUM_MILLIONS = 75  # EUR millions
+
 # Number of threads for I/O operations
 N_THREADS = min(32, 4 * 4)
 
 # Force recompute (set to True to regenerate files)
-FORCE_RECOMPUTE = False
+FORCE_RECOMPUTE = True
 
 # Output directory (relative to this script's location)
 OUTPUT_DIR = Path(__file__).parent / 'data'
@@ -183,7 +188,37 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
     db_path = str(project_root / "maintenance" / "data" / "etf_database.db")
     db = ETFDatabase(db_path)
     universe_df = db.load_universe()
+
+    # Filter by minimum AUM to reduce survivor bias
+    # Smaller ETFs are more likely to be delisted
+    initial_count = len(universe_df)
+
+    # Keep original for core ISIN verification
+    universe_original = universe_df.copy()
+
+    universe_df = universe_df[
+        (universe_df['fund_size'].notna()) &
+        (universe_df['fund_size'] >= MIN_AUM_MILLIONS)
+    ].copy()
+    filtered_count = initial_count - len(universe_df)
+
+    print(f"\nAUM Filter: {initial_count} total ETFs → {len(universe_df)} with AUM >= {MIN_AUM_MILLIONS}M EUR")
+    if filtered_count > 0:
+        print(f"  Excluded {filtered_count} ETFs with lower AUM (reduces survivor bias)")
+
     etf_list = universe_df['isin'].tolist()
+
+    # Verify core ETF passed AUM filter
+    if CORE_ISIN not in etf_list:
+        core_data = universe_original[universe_original['isin'] == CORE_ISIN]
+        if len(core_data) == 0:
+            raise ValueError(f"Core ISIN {CORE_ISIN} not found in database")
+        core_aum = core_data['fund_size'].values[0]
+        raise ValueError(
+            f"Core ISIN {CORE_ISIN} has AUM {core_aum:.0f}M EUR, "
+            f"below minimum threshold of {MIN_AUM_MILLIONS}M EUR. "
+            f"Increase MIN_AUM_MILLIONS or use different core ETF."
+        )
 
     print(f"\nLoading price data for {len(etf_list)} ETFs with {N_THREADS} threads...")
 

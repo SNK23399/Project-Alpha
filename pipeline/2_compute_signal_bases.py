@@ -47,7 +47,7 @@ DATA_DIR = PIPELINE_DIR / 'data'
 
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
-CORRELATION_THRESHOLD = 0.05
+CORRELATION_THRESHOLD = 0.0
 
 
 def backup_signal_bases() -> str:

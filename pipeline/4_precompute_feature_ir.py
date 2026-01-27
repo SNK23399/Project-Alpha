@@ -61,7 +61,7 @@ N_SATELLITES_MAX = 10
 HOLDING_MONTHS = 1
 
 # Force recompute (set to True to regenerate files)
-FORCE_RECOMPUTE = False
+FORCE_RECOMPUTE = True
 
 # Output directory (relative to this script's location)
 OUTPUT_DIR = Path(__file__).parent / 'data'
