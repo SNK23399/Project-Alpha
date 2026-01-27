@@ -13,7 +13,7 @@ from datetime import datetime
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 MAIN_DB_PATH = PROJECT_ROOT / 'maintenance' / 'data' / 'etf_database.db'
-PIPELINE_SCRIPT = PROJECT_ROOT / 'pipeline' / 'main.py'
+PIPELINE_SCRIPT = PROJECT_ROOT / 'main.py'
 BACKTEST_OUTPUT_DIR = PROJECT_ROOT / 'pipeline' / 'data' / 'backtest_results'
 DATABASES_DIR = SCRIPT_DIR / 'databases'
 
@@ -57,7 +57,7 @@ cmd = ['python', str(PIPELINE_SCRIPT), '--steps', '1,2,3,4,5,6']
 try:
     result = subprocess.run(
         cmd,
-        cwd=str(PROJECT_ROOT / 'pipeline'),
+        cwd=str(PROJECT_ROOT),
         capture_output=False,  # Show output directly
         text=True,
         timeout=600

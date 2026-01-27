@@ -20,7 +20,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PIPELINE_DIR="$PROJECT_ROOT/pipeline"
+PIPELINE_DIR="$PROJECT_ROOT"
 MAINTENANCE_DIR="$PROJECT_ROOT/maintenance"
 VALIDATION_DIR="$SCRIPT_DIR"
 BACKUP_DIR="$VALIDATION_DIR/database_backups"
