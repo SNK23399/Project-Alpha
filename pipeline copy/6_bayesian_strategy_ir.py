@@ -935,6 +935,42 @@ def walk_forward_backtest(data: dict, n_satellites: int,
 # ANALYSIS
 # ============================================================
 
+def calculate_stability_metrics(results_df: pd.DataFrame) -> dict:
+    """
+    Calculate stability metrics for monthly returns.
+
+    Returns dict with:
+    - mean: Mean monthly return
+    - std: Standard deviation of monthly returns
+    - cv: Coefficient of Variation (std/mean) - lower is more stable
+    - min_return: Minimum monthly return
+    - max_return: Maximum monthly return
+    - negative_months: Number of negative return months
+    - total_months: Total number of months
+    """
+    if len(results_df) == 0:
+        return None
+
+    monthly_returns = results_df['avg_alpha'].values
+    mean_return = np.mean(monthly_returns)
+    std_return = np.std(monthly_returns)
+    cv = std_return / mean_return if mean_return != 0 else 0
+    min_return = np.min(monthly_returns)
+    max_return = np.max(monthly_returns)
+    negative_months = np.sum(monthly_returns < 0)
+    total_months = len(monthly_returns)
+
+    return {
+        'mean': mean_return,
+        'std': std_return,
+        'cv': cv,
+        'min_return': min_return,
+        'max_return': max_return,
+        'negative_months': negative_months,
+        'total_months': total_months,
+    }
+
+
 def analyze_results(results_df: pd.DataFrame, n_satellites: int,
                     hp_diagnostics: List[dict]) -> Optional[dict]:
     if len(results_df) == 0:
@@ -959,6 +995,9 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
     avg_prior_strength = results_df['learned_prior_strength'].mean()
     final_prior_strength = results_df['learned_prior_strength'].iloc[-1]
 
+    # Stability metrics
+    stability = calculate_stability_metrics(results_df)
+
     return {
         'n_satellites': n_satellites,
         'n_periods': len(results_df),
@@ -972,6 +1011,12 @@ def analyze_results(results_df: pd.DataFrame, n_satellites: int,
         'final_decay': final_decay,
         'avg_prior_strength': avg_prior_strength,
         'final_prior_strength': final_prior_strength,
+        'stability_mean': stability['mean'] if stability else 0,
+        'stability_std': stability['std'] if stability else 0,
+        'stability_cv': stability['cv'] if stability else 0,
+        'stability_min': stability['min_return'] if stability else 0,
+        'stability_max': stability['max_return'] if stability else 0,
+        'stability_neg_months': stability['negative_months'] if stability else 0,
     }
 
 
@@ -1061,6 +1106,12 @@ def main():
                 print(f"    Annual Alpha: {stats['annual_alpha']*100:.1f}%")
                 print(f"    Hit Rate: {stats['hit_rate']:.2%}")
                 print(f"    Information Ratio: {stats['information_ratio']:.3f}")
+                print(f"\n  Stability Metrics (Return Consistency):")
+                print(f"    Mean Monthly Return: {stats['stability_mean']*100:7.3f}%")
+                print(f"    Std Dev (Volatility): {stats['stability_std']*100:7.3f}%")
+                print(f"    Coefficient of Variation: {stats['stability_cv']:7.4f} (lower = more stable)")
+                print(f"    Range (Min - Max): {stats['stability_min']*100:7.3f}% to {stats['stability_max']*100:7.3f}%")
+                print(f"    Negative Months: {int(stats['stability_neg_months'])}/{stats['n_periods']}")
                 print(f"\n  Learned Hyperparameters (final, 2 total):")
                 print(f"    Decay: {stats['final_decay']:.4f}")
                 print(f"    Prior Strength: {stats['final_prior_strength']:.1f}")
@@ -1096,6 +1147,26 @@ def main():
 
         print("-" * 75)
 
+        # Stability Analysis
+        print("\nSTABILITY ANALYSIS - Monthly Return Distribution")
+        print("-" * 75)
+        print(f"{'N':>3} {'Mean (%)':>10} {'Std (%)':>10} {'CV':>8} {'Range':>20} {'Neg Mo.':>8}")
+        print("-" * 75)
+
+        for _, row in summary_df.sort_values('n_satellites').iterrows():
+            n_val = int(row['n_satellites'])
+            mean = row['stability_mean'] * 100
+            std = row['stability_std'] * 100
+            cv = row['stability_cv']
+            min_ret = row['stability_min'] * 100
+            max_ret = row['stability_max'] * 100
+            neg_mo = int(row['stability_neg_months'])
+            range_str = f"{min_ret:6.2f}% - {max_ret:6.2f}%"
+
+            print(f"{n_val:>3} {mean:10.3f} {std:10.3f} {cv:8.4f} {range_str:>20} {neg_mo:>8d}")
+
+        print("-" * 75)
+
         # Best by Information Ratio
         best_idx = summary_df['information_ratio'].idxmax()
         best = summary_df.loc[best_idx]
@@ -1104,6 +1175,15 @@ def main():
         print(f"  Hit Rate: {best['hit_rate']:.1%}")
         print(f"  Annual Alpha: {best['annual_alpha']*100:.1f}%")
         print(f"  Learned (final): Decay={best['final_decay']:.3f}, Prior={best['final_prior_strength']:.1f}")
+
+        # Best by Stability (lowest CV)
+        best_stability_idx = summary_df['stability_cv'].idxmin()
+        best_stability = summary_df.loc[best_stability_idx]
+        print(f"\nMost Stable (lowest CV): N={int(best_stability['n_satellites'])}")
+        print(f"  Coefficient of Variation: {best_stability['stability_cv']:.4f}")
+        print(f"  Mean Monthly Return: {best_stability['stability_mean']*100:.3f}%")
+        print(f"  Std Dev (Volatility): {best_stability['stability_std']*100:.3f}%")
+        print(f"  Annual Return: {best_stability['annual_alpha']*100:.1f}%")
 
         # Save summary
         summary_file = OUTPUT_DIR / 'bayesian_backtest_summary.csv'

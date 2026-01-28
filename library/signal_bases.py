@@ -2081,10 +2081,135 @@ def compute_signal_bases_generator(
     if result: yield result
 
     # =========================================================================
+    # MACD/PPO/APO VARIANTS WITH DPO-COMPATIBLE PARAMETERS
+    # Testing different EMA pairs aligned with DPO's 20-period timescale
+    # =========================================================================
+
+    # MACD (10, 20, 9) - Shorter version, 2:1 ratio like standard but faster
+    macd_10_20_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_signal_10_20_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_hist_10_20_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+
+    for col in etf_prices.columns:
+        macd_10_20 = ta.trend.MACD(etf_prices[col], window_slow=20, window_fast=10, window_sign=9)
+        macd_10_20_vals[col] = macd_10_20.macd()
+        macd_signal_10_20_vals[col] = macd_10_20.macd_signal()
+        macd_hist_10_20_vals[col] = macd_10_20.macd_diff()
+
+    result = store_and_yield(macd_10_20_vals.values, 'macd_line_10_20')
+    if result: yield result
+
+    result = store_and_yield(macd_signal_10_20_vals.values, 'macd_signal_10_20')
+    if result: yield result
+
+    result = store_and_yield(macd_hist_10_20_vals.values, 'macd_histogram_10_20')
+    if result: yield result
+
+    # MACD (20, 40, 9) - Longer version, 2:1 ratio, centered around DPO's 20
+    macd_20_40_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_signal_20_40_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_hist_20_40_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+
+    for col in etf_prices.columns:
+        macd_20_40 = ta.trend.MACD(etf_prices[col], window_slow=40, window_fast=20, window_sign=9)
+        macd_20_40_vals[col] = macd_20_40.macd()
+        macd_signal_20_40_vals[col] = macd_20_40.macd_signal()
+        macd_hist_20_40_vals[col] = macd_20_40.macd_diff()
+
+    result = store_and_yield(macd_20_40_vals.values, 'macd_line_20_40')
+    if result: yield result
+
+    result = store_and_yield(macd_signal_20_40_vals.values, 'macd_signal_20_40')
+    if result: yield result
+
+    result = store_and_yield(macd_hist_20_40_vals.values, 'macd_histogram_20_40')
+    if result: yield result
+
+    # MACD (20, 50, 9) - Longer ratio, 2.5:1, matches standard ratio better
+    macd_20_50_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_signal_20_50_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+    macd_hist_20_50_vals = pd.DataFrame(index=etf_prices.index, columns=etf_prices.columns)
+
+    for col in etf_prices.columns:
+        macd_20_50 = ta.trend.MACD(etf_prices[col], window_slow=50, window_fast=20, window_sign=9)
+        macd_20_50_vals[col] = macd_20_50.macd()
+        macd_signal_20_50_vals[col] = macd_20_50.macd_signal()
+        macd_hist_20_50_vals[col] = macd_20_50.macd_diff()
+
+    result = store_and_yield(macd_20_50_vals.values, 'macd_line_20_50')
+    if result: yield result
+
+    result = store_and_yield(macd_signal_20_50_vals.values, 'macd_signal_20_50')
+    if result: yield result
+
+    result = store_and_yield(macd_hist_20_50_vals.values, 'macd_histogram_20_50')
+    if result: yield result
+
+    # PPO variants with DPO-compatible parameters
+    # PPO (10, 20, 9)
+    ema_10_df = etf_prices.ewm(span=10).mean()
+    ema_20_df = etf_prices.ewm(span=20).mean()
+    ppo_10_20 = ((ema_10_df - ema_20_df) / ema_20_df) * 100
+    result = store_and_yield(ppo_10_20.values, 'ppo_10_20')
+    if result: yield result
+
+    ppo_10_20_signal = ppo_10_20.ewm(span=9).mean()
+    result = store_and_yield(ppo_10_20_signal.values, 'ppo_10_20_signal')
+    if result: yield result
+
+    ppo_10_20_histogram = ppo_10_20 - ppo_10_20_signal
+    result = store_and_yield(ppo_10_20_histogram.values, 'ppo_10_20_histogram')
+    if result: yield result
+
+    # PPO (20, 40, 9)
+    ema_40_df = etf_prices.ewm(span=40).mean()
+    ppo_20_40 = ((ema_20_df - ema_40_df) / ema_40_df) * 100
+    result = store_and_yield(ppo_20_40.values, 'ppo_20_40')
+    if result: yield result
+
+    ppo_20_40_signal = ppo_20_40.ewm(span=9).mean()
+    result = store_and_yield(ppo_20_40_signal.values, 'ppo_20_40_signal')
+    if result: yield result
+
+    ppo_20_40_histogram = ppo_20_40 - ppo_20_40_signal
+    result = store_and_yield(ppo_20_40_histogram.values, 'ppo_20_40_histogram')
+    if result: yield result
+
+    # PPO (20, 50, 9)
+    ema_50_df = etf_prices.ewm(span=50).mean()
+    ppo_20_50 = ((ema_20_df - ema_50_df) / ema_50_df) * 100
+    result = store_and_yield(ppo_20_50.values, 'ppo_20_50')
+    if result: yield result
+
+    ppo_20_50_signal = ppo_20_50.ewm(span=9).mean()
+    result = store_and_yield(ppo_20_50_signal.values, 'ppo_20_50_signal')
+    if result: yield result
+
+    ppo_20_50_histogram = ppo_20_50 - ppo_20_50_signal
+    result = store_and_yield(ppo_20_50_histogram.values, 'ppo_20_50_histogram')
+    if result: yield result
+
+    # APO (Absolute Price Oscillator) variants - same as MACD but explicit naming
+    # APO (10, 20)
+    apo_10_20 = ema_10_df - ema_20_df
+    result = store_and_yield(apo_10_20.values, 'apo_10_20')
+    if result: yield result
+
+    # APO (20, 40)
+    apo_20_40 = ema_20_df - ema_40_df
+    result = store_and_yield(apo_20_40.values, 'apo_20_40')
+    if result: yield result
+
+    # APO (20, 50)
+    apo_20_50 = ema_20_df - ema_50_df
+    result = store_and_yield(apo_20_50.values, 'apo_20_50')
+    if result: yield result
+
+    # =========================================================================
     # ADVANCED TREND INDICATORS
     # =========================================================================
 
-    # DPO
+    # DPO - Original (20-period)
     dpo_period = 20
     shift = dpo_period // 2 + 1
     ma_dpo = rolling_mean(prices_arr, dpo_period)
@@ -2093,6 +2218,118 @@ def compute_signal_bases_generator(
     dpo[-shift:, :] = np.nan
     result = store_and_yield(dpo, 'dpo')
     if result: yield result
+
+    # =========================================================================
+    # DPO VARIANTS - PARAMETER EXPLORATION
+    # Testing different lookback periods to find optimal cycle detection
+    # =========================================================================
+
+    # DPO (10-period) - Shorter, faster cycle detection
+    dpo_10_period = 10
+    dpo_10_shift = dpo_10_period // 2 + 1
+    ma_dpo_10 = rolling_mean(prices_arr, dpo_10_period)
+    dpo_10 = np.empty_like(prices_arr)
+    dpo_10[:-dpo_10_shift, :] = prices_arr[dpo_10_shift:, :] - ma_dpo_10[:-dpo_10_shift, :]
+    dpo_10[-dpo_10_shift:, :] = np.nan
+    # DISABLED: DPO(10d) - Performance: 2.878 IR (too noisy)
+    # result = store_and_yield(dpo_10, 'dpo_10d')
+    # if result: yield result
+
+    # DPO (15-period)
+    dpo_15_period = 15
+    dpo_15_shift = dpo_15_period // 2 + 1
+    ma_dpo_15 = rolling_mean(prices_arr, dpo_15_period)
+    dpo_15 = np.empty_like(prices_arr)
+    dpo_15[:-dpo_15_shift, :] = prices_arr[dpo_15_shift:, :] - ma_dpo_15[:-dpo_15_shift, :]
+    dpo_15[-dpo_15_shift:, :] = np.nan
+    # DISABLED: DPO(15d) - Performance: ~3.0 IR (poor)
+    # result = store_and_yield(dpo_15, 'dpo_15d')
+    # if result: yield result
+
+    # DPO (25-period)
+    dpo_25_period = 25
+    dpo_25_shift = dpo_25_period // 2 + 1
+    ma_dpo_25 = rolling_mean(prices_arr, dpo_25_period)
+    dpo_25 = np.empty_like(prices_arr)
+    dpo_25[:-dpo_25_shift, :] = prices_arr[dpo_25_shift:, :] - ma_dpo_25[:-dpo_25_shift, :]
+    dpo_25[-dpo_25_shift:, :] = np.nan
+    # DISABLED: DPO(25d) - Performance: ~3.7 IR (poor)
+    # result = store_and_yield(dpo_25, 'dpo_25d')
+    # if result: yield result
+
+    # DPO (30-period)
+    dpo_30_period = 30
+    dpo_30_shift = dpo_30_period // 2 + 1
+    ma_dpo_30 = rolling_mean(prices_arr, dpo_30_period)
+    dpo_30 = np.empty_like(prices_arr)
+    dpo_30[:-dpo_30_shift, :] = prices_arr[dpo_30_shift:, :] - ma_dpo_30[:-dpo_30_shift, :]
+    dpo_30[-dpo_30_shift:, :] = np.nan
+    # DISABLED: DPO(30d) - Performance: 3.905 IR (suboptimal vs 50d)
+    # result = store_and_yield(dpo_30, 'dpo_30d')
+    # if result: yield result
+
+    # DPO (40-period)
+    dpo_40_period = 40
+    dpo_40_shift = dpo_40_period // 2 + 1
+    ma_dpo_40 = rolling_mean(prices_arr, dpo_40_period)
+    dpo_40 = np.empty_like(prices_arr)
+    dpo_40[:-dpo_40_shift, :] = prices_arr[dpo_40_shift:, :] - ma_dpo_40[:-dpo_40_shift, :]
+    dpo_40[-dpo_40_shift:, :] = np.nan
+    # DISABLED: DPO(40d) - Performance: 4.474 IR (good but suboptimal vs 50d/60d)
+    # result = store_and_yield(dpo_40, 'dpo_40d')
+    # if result: yield result
+
+    # DPO (50-period)
+    dpo_50_period = 50
+    dpo_50_shift = dpo_50_period // 2 + 1
+    ma_dpo_50 = rolling_mean(prices_arr, dpo_50_period)
+    dpo_50 = np.empty_like(prices_arr)
+    dpo_50[:-dpo_50_shift, :] = prices_arr[dpo_50_shift:, :] - ma_dpo_50[:-dpo_50_shift, :]
+    dpo_50[-dpo_50_shift:, :] = np.nan
+    result = store_and_yield(dpo_50, 'dpo_50d')
+    if result: yield result
+
+    # DPO (60-period) - Testing upper bounds for optimal cycle
+    dpo_60_period = 60
+    dpo_60_shift = dpo_60_period // 2 + 1
+    ma_dpo_60 = rolling_mean(prices_arr, dpo_60_period)
+    dpo_60 = np.empty_like(prices_arr)
+    dpo_60[:-dpo_60_shift, :] = prices_arr[dpo_60_shift:, :] - ma_dpo_60[:-dpo_60_shift, :]
+    dpo_60[-dpo_60_shift:, :] = np.nan
+    result = store_and_yield(dpo_60, 'dpo_60d')
+    if result: yield result
+
+    # DPO (70-period)
+    dpo_70_period = 70
+    dpo_70_shift = dpo_70_period // 2 + 1
+    ma_dpo_70 = rolling_mean(prices_arr, dpo_70_period)
+    dpo_70 = np.empty_like(prices_arr)
+    dpo_70[:-dpo_70_shift, :] = prices_arr[dpo_70_shift:, :] - ma_dpo_70[:-dpo_70_shift, :]
+    dpo_70[-dpo_70_shift:, :] = np.nan
+    result = store_and_yield(dpo_70, 'dpo_70d')
+    if result: yield result
+
+    # DPO (80-period)
+    dpo_80_period = 80
+    dpo_80_shift = dpo_80_period // 2 + 1
+    ma_dpo_80 = rolling_mean(prices_arr, dpo_80_period)
+    dpo_80 = np.empty_like(prices_arr)
+    dpo_80[:-dpo_80_shift, :] = prices_arr[dpo_80_shift:, :] - ma_dpo_80[:-dpo_80_shift, :]
+    dpo_80[-dpo_80_shift:, :] = np.nan
+    # DISABLED: DPO(80d) - Performance: 4.532 IR (degrades ensemble performance)
+    # result = store_and_yield(dpo_80, 'dpo_80d')
+    # if result: yield result
+
+    # DPO (100-period) - Quarterly cycle test
+    dpo_100_period = 100
+    dpo_100_shift = dpo_100_period // 2 + 1
+    ma_dpo_100 = rolling_mean(prices_arr, dpo_100_period)
+    dpo_100 = np.empty_like(prices_arr)
+    dpo_100[:-dpo_100_shift, :] = prices_arr[dpo_100_shift:, :] - ma_dpo_100[:-dpo_100_shift, :]
+    dpo_100[-dpo_100_shift:, :] = np.nan
+    # DISABLED: DPO(100d) - Performance: 4.120 IR (degrades ensemble significantly)
+    # result = store_and_yield(dpo_100, 'dpo_100d')
+    # if result: yield result
 
     # TRIX - Use pandas ewm for correct NaN handling
     trix_period = 15
