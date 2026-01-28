@@ -1,16 +1,24 @@
 """
-Step 2: Compute Signal Bases (Enhanced DPO Variants)
-====================================================
+Step 2: Compute Signal Bases (TEMA-Optimized DPO Variants)
+===========================================================
 
 This script:
 1. Loads ETF prices from the database
-2. Computes enhanced DPO variants with multiple moving average types
+2. Computes TEMA-optimized DPO variants with multi-shift exploration
 3. Saves DPO signals to parquet files (each signal saved immediately)
 
 Features:
-- ENHANCED DPO: Computes 372 DPO variants (31 windows × 12 MA types)
-  - Windows: 40d through 70d (steps of 1)
-  - MA types: sma, ema, dema, tema, zlema, hull, wma, trima, kama, median, gaussian, adaptive_ema
+- TEMA-ONLY: Computes 287 DPO variants (41 windows × 7 variants)
+  - Windows: 30d through 70d (steps of 1 = 41 windows)
+  - 7 TEMA shift divisors: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+- TEMA SHIFT DIVISORS: Explores optimal lag-shift alignment for TEMA
+  - shift_1_1 (period / 1.1): Smallest shift
+  - shift_1_2 (period / 1.2):
+  - shift_1_3 (period / 1.3):
+  - shift_1_4 (period / 1.4):
+  - shift_1_5 (period / 1.5): Previously "conservative"
+  - shift_1_6 (period / 1.6):
+  - shift_1_7 (period / 1.7): Largest shift
 - FULL recomputation: Always recomputes from scratch to ensure fresh data
 - Price corrections captured: Any database updates are reflected
 - Fresh rolling windows: All calculations use current data
@@ -18,7 +26,7 @@ Features:
 - GPU-accelerated: Uses optimized implementations from signal_filters
 
 Outputs:
-- pipeline copy/data/signals/    Contains enhanced DPO parquet files (~370-450 after filters)
+- pipeline copy/data/signals/    Contains TEMA-optimized DPO parquet files (~350-450 after filters)
 - pipeline copy/data/rankings_matrix_signal_bases_1month.npz  Ranking matrix for features
 
 Usage:
@@ -56,18 +64,21 @@ CORRELATION_THRESHOLD = 0.0
 
 
 def enhanced_dpo_generator(etf_prices, core_prices):
-    """Generator wrapper that yields enhanced DPO variants.
+    """Generator wrapper that yields TEMA-only DPO variants.
 
-    Uses compute_dpo_variants_generator which implements DPO with multiple MA types:
+    Uses compute_dpo_variants_generator which implements DPO with:
 
-    Original MA types (6):
-    - sma, ema, dema, tema, zlema, hull
+    7 TEMA shift divisors (optimized lag-shift alignment):
+    - tema__shift_1_1   (shift = period / 1.1)
+    - tema__shift_1_2   (shift = period / 1.2)
+    - tema__shift_1_3   (shift = period / 1.3)
+    - tema__shift_1_4   (shift = period / 1.4)
+    - tema__shift_1_5   (shift = period / 1.5)
+    - tema__shift_1_6   (shift = period / 1.6)
+    - tema__shift_1_7   (shift = period / 1.7)
 
-    Extended MA types (6):
-    - wma, trima, kama, median, gaussian, adaptive_ema
-
-    Across windows: 40d through 70d (steps of 1)
-    Total: 31 windows × 12 MA types = 372 variants
+    Across windows: 30d through 70d (steps of 1 = 41 windows)
+    Total: 41 windows × 7 variants = 287 DPO variants
     """
     for signal_name, signal_2d in compute_dpo_variants_generator(etf_prices, core_prices):
         yield signal_name, signal_2d
