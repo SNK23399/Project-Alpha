@@ -47,10 +47,10 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from support.signal_database import SignalDatabase
-from library.signal_filters import (
-    compute_filtered_signals_optimized,
-    get_available_filters,
-    GPU_AVAILABLE
+from library.signal_filters import GPU_AVAILABLE
+from library.savgol_enhanced_variants import (
+    compute_savgol_variants_generator,
+    count_savgol_variants
 )
 
 # Output directories
@@ -288,19 +288,16 @@ def main():
 
     print(f"\nFound {len(base_signal_names)} base signals")
 
-    # Get filter names
-    if args.filters:
-        filter_names = [f.strip() for f in args.filters.split(',')]
-        available = get_available_filters()
-        invalid = [f for f in filter_names if f not in available]
-        if invalid:
-            print(f"\nERROR: Invalid filter names: {invalid}")
-            print(f"Available filters: {available}")
-            return 1
-    else:
-        filter_names = get_available_filters()
+    # Savgol parameters (windows ONLY - polyorder_2 is LOCKED as optimal)
+    savgol_windows = [15, 17, 19, 21, 23, 25, 27, 31, 35]
+    savgol_polyorders = [2]  # polyorder_2 ONLY (empirically 83-87% selection rate)
+    n_savgol_variants = len(savgol_windows) * len(savgol_polyorders)
 
-    print(f"Applying {len(filter_names)} filters")
+    # Only use Savitzky-Golay filter (ensemble-validated best performer)
+    filter_names = ['savgol']
+    print(f"Filter: Savitzky-Golay (ensemble-validated best performer)")
+    print(f"  Windows: {savgol_windows} (9 sizes)")
+    print(f"  Polynomial order: {savgol_polyorders[0]} ONLY (optimized - polyorder_2 locked as best)")
 
     # Backup existing filtered signals before recomputation
     print("\nBacking up and clearing existing filtered signals...")
@@ -312,10 +309,10 @@ def main():
         shutil.rmtree(filtered_dir, ignore_errors=True)
     filtered_dir.mkdir(parents=True, exist_ok=True)
 
-    # Calculate totals
-    total_combinations = len(base_signal_names) * len(filter_names)
+    # Calculate totals: DPO bases × Savgol variants per base
+    total_combinations = len(base_signal_names) * n_savgol_variants
 
-    print(f"\nConfiguration: {total_combinations} combinations ({len(base_signal_names)} signals × {len(filter_names)} filters)")
+    print(f"\nConfiguration: {total_combinations} combinations ({len(base_signal_names)} DPO bases × {n_savgol_variants} Savgol variants)")
     print(f"  Batch size: {args.batch_size} | Workers: {args.workers} | GPU: {GPU_AVAILABLE}")
 
     # Load all base signals into memory (they're needed for batching)
@@ -396,15 +393,30 @@ def main():
     start_time = time.time()
     print(f"Computing and saving {total_combinations} filtered signals...")
 
-    for filtered_name, filtered_data in compute_filtered_signals_optimized(
-        signal_bases,
-        filter_names=filter_names,
-        skip_signals=set(),  # Always compute all
-        batch_size=args.batch_size,
-        show_progress=True
-    ):
-        # Queue for parallel saving
-        save_queue.put((filtered_name, filtered_data))
+    # Import causal_savgol for Savitzky-Golay filtering
+    from library.signal_filters import causal_savgol
+
+    # Apply Savgol filter to each base signal with different window/polyorder combinations
+    from tqdm import tqdm
+    for base_signal_name in tqdm(sorted(signal_bases.keys()), desc="Base signals"):
+        base_array = signal_bases[base_signal_name]
+
+        # Apply each Savgol variant
+        for window in savgol_windows:
+            for polyorder in savgol_polyorders:
+                filtered_name = f"{base_signal_name}__savgol_{window}d_polyorder_{polyorder}"
+
+                try:
+                    # Apply causal Savgol filter to ALL ETFs at once (vectorized)
+                    # causal_savgol expects (n_signals, n_time, n_etfs) input
+                    base_3d = base_array[np.newaxis, :, :]  # Shape: (1, n_time, n_etfs)
+                    filtered_3d = causal_savgol(base_3d, window, polyorder)
+                    filtered_data = filtered_3d[0, :, :]  # Extract back to 2D (n_time, n_etfs)
+
+                    # Queue for parallel saving
+                    save_queue.put((filtered_name, filtered_data))
+                except Exception as e:
+                    print(f"  Error applying Savgol to {filtered_name}: {e}")
 
     # Signal workers to stop
     for _ in save_threads:
