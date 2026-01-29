@@ -1,20 +1,33 @@
 """
-Step 2: Compute Signal Bases
-============================
+Step 2: Compute Signal Bases (TEMA-Optimized DPO Variants)
+===========================================================
 
 This script:
 1. Loads ETF prices from the database
-2. Computes all 293 signal bases (momentum, volatility, technical indicators, etc.)
-3. Saves them to parquet files (each signal saved immediately)
+2. Computes TEMA-optimized DPO variants with multi-shift exploration
+3. Saves DPO signals to parquet files (each signal saved immediately)
 
 Features:
+- TEMA-ONLY: Computes 287 DPO variants (41 windows × 7 variants)
+  - Windows: 30d through 70d (steps of 1 = 41 windows)
+  - 7 TEMA shift divisors: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
+- TEMA SHIFT DIVISORS: Explores optimal lag-shift alignment for TEMA
+  - shift_1_1 (period / 1.1): Smallest shift
+  - shift_1_2 (period / 1.2):
+  - shift_1_3 (period / 1.3):
+  - shift_1_4 (period / 1.4):
+  - shift_1_5 (period / 1.5): Previously "conservative"
+  - shift_1_6 (period / 1.6):
+  - shift_1_7 (period / 1.7): Largest shift
 - FULL recomputation: Always recomputes from scratch to ensure fresh data
 - Price corrections captured: Any database updates are reflected
 - Fresh rolling windows: All calculations use current data
 - No look-ahead bias: Signal computation only uses historical price data
+- GPU-accelerated: Uses optimized implementations from signal_filters
 
 Outputs:
-- pipeline/data/signals/    Contains 293 parquet files (one per signal base)
+- pipeline copy/data/signals/    Contains TEMA-optimized DPO parquet files (~350-450 after filters)
+- pipeline copy/data/rankings_matrix_signal_bases_1month.npz  Ranking matrix for features
 
 Usage:
   python 2_compute_signal_bases.py                     # All data (2009-09-25 to today)
@@ -37,7 +50,7 @@ sys.path.insert(0, str(project_root))
 
 from support.etf_database import ETFDatabase
 from support.signal_database import SignalDatabase
-from library.signal_bases import compute_signal_bases_generator, count_total_signals
+from library.dpo_enhanced_variants import compute_dpo_variants_generator, count_dpo_variants
 
 # Output directories
 PIPELINE_DIR = Path(__file__).parent
@@ -47,7 +60,28 @@ DATA_DIR = PIPELINE_DIR / 'data'
 
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
-CORRELATION_THRESHOLD = 0.1
+CORRELATION_THRESHOLD = 0.0
+
+
+def enhanced_dpo_generator(etf_prices, core_prices):
+    """Generator wrapper that yields TEMA-only DPO variants.
+
+    Uses compute_dpo_variants_generator which implements DPO with:
+
+    7 TEMA shift divisors (optimized lag-shift alignment):
+    - tema__shift_1_1   (shift = period / 1.1)
+    - tema__shift_1_2   (shift = period / 1.2)
+    - tema__shift_1_3   (shift = period / 1.3)
+    - tema__shift_1_4   (shift = period / 1.4)
+    - tema__shift_1_5   (shift = period / 1.5)
+    - tema__shift_1_6   (shift = period / 1.6)
+    - tema__shift_1_7   (shift = period / 1.7)
+
+    Across windows: 30d through 70d (steps of 1 = 41 windows)
+    Total: 41 windows × 7 variants = 287 DPO variants
+    """
+    for signal_name, signal_2d in compute_dpo_variants_generator(etf_prices, core_prices):
+        yield signal_name, signal_2d
 
 
 def backup_signal_bases() -> str:
@@ -253,8 +287,9 @@ def compute_and_save_signal_bases(
     n_signals = 0
 
     # Get total signal count upfront for accurate progress bar
-    total_signals = count_total_signals()
-    print(f"  Total signals to compute: {total_signals}")
+    # Using DPO variants since this pipeline only computes DPO signals
+    total_signals = count_dpo_variants()
+    print(f"  Total signals to compute: {total_signals} (enhanced DPO variants)")
 
     # Initialize ranking matrix components BEFORE main loop (for inline computation)
     print("\n  Preparing ranking matrix components...")
@@ -286,12 +321,14 @@ def compute_and_save_signal_bases(
 
     # Compute signals one at a time and save immediately
     # Using tqdm to show progress with accurate total count
+    # ENHANCED DPO: Using enhanced variant generator with multiple MA types
+    n_dpo_variants = count_dpo_variants()
     pbar = tqdm(
-        compute_signal_bases_generator(etf_prices, core_prices),
-        desc="Computing signal bases",
+        enhanced_dpo_generator(etf_prices, core_prices),
+        desc="Computing enhanced DPO variants",
         unit="signal",
         ncols=120,
-        total=total_signals
+        total=n_dpo_variants
     )
 
     for signal_name, signal_2d in pbar:
@@ -304,7 +341,7 @@ def compute_and_save_signal_bases(
         display_name = display_name.ljust(max_name_len)
         pbar.set_description(f"Computing: {display_name}")
 
-        # Save to parquet (all dates) - save ALL signal bases
+        # Save to parquet (all dates) - generator already filters to DPO-only
         records = signal_db.save_signal_base_from_array(
             signal_name, signal_2d, save_dates, isin_list
         )

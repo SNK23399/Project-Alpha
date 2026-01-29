@@ -65,7 +65,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_PRECOMPUTE = [3, 4, 5, 6, 7]
+N_SATELLITES_TO_PRECOMPUTE = [1, 2, 3, 4, 5]
 MIN_TRAINING_MONTHS = 36
 # Note: No pre-filtering - all 7,618 features evaluated for true Bayesian learning
 DECAY_HALF_LIFE_MONTHS = 54
