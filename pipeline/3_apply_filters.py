@@ -48,10 +48,6 @@ sys.path.insert(0, str(project_root))
 
 from support.signal_database import SignalDatabase
 from library.signal_filters import GPU_AVAILABLE
-from library.savgol_enhanced_variants import (
-    compute_savgol_variants_generator,
-    count_savgol_variants
-)
 
 # Output directories
 PIPELINE_DIR = Path(__file__).parent

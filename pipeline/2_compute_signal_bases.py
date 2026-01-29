@@ -36,7 +36,6 @@ Usage:
 
 import sys
 import time
-import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 import pandas as pd
@@ -61,27 +60,6 @@ DATA_DIR = PIPELINE_DIR / 'data'
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
 CORRELATION_THRESHOLD = 0.0
-
-
-def enhanced_dpo_generator(etf_prices, core_prices):
-    """Generator wrapper that yields TEMA-only DPO variants.
-
-    Uses compute_dpo_variants_generator which implements DPO with:
-
-    7 TEMA shift divisors (optimized lag-shift alignment):
-    - tema__shift_1_1   (shift = period / 1.1)
-    - tema__shift_1_2   (shift = period / 1.2)
-    - tema__shift_1_3   (shift = period / 1.3)
-    - tema__shift_1_4   (shift = period / 1.4)
-    - tema__shift_1_5   (shift = period / 1.5)
-    - tema__shift_1_6   (shift = period / 1.6)
-    - tema__shift_1_7   (shift = period / 1.7)
-
-    Across windows: 30d through 70d (steps of 1 = 41 windows)
-    Total: 41 windows × 7 variants = 287 DPO variants
-    """
-    for signal_name, signal_2d in compute_dpo_variants_generator(etf_prices, core_prices):
-        yield signal_name, signal_2d
 
 
 def backup_signal_bases() -> str:
@@ -321,14 +299,12 @@ def compute_and_save_signal_bases(
 
     # Compute signals one at a time and save immediately
     # Using tqdm to show progress with accurate total count
-    # ENHANCED DPO: Using enhanced variant generator with multiple MA types
-    n_dpo_variants = count_dpo_variants()
     pbar = tqdm(
-        enhanced_dpo_generator(etf_prices, core_prices),
-        desc="Computing enhanced DPO variants",
+        compute_dpo_variants_generator(etf_prices, core_prices),
+        desc="Computing DPO variants",
         unit="signal",
         ncols=120,
-        total=n_dpo_variants
+        total=total_signals
     )
 
     for signal_name, signal_2d in pbar:

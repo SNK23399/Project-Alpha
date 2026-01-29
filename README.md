@@ -1,234 +1,177 @@
 # ETF Portfolio Management - Core-Satellite Strategy
 
-A Python-based portfolio management system implementing a **Core-Satellite investment strategy** with machine learning signal generation for ETF alpha prediction.
+A Python-based pipeline implementing a **Core-Satellite investment strategy** with Bayesian signal-based satellite selection for ETF alpha prediction.
 
 ## Overview
 
-This project aims to generate **consistent positive alpha** over a global market baseline (MSCI World) through tactical satellite allocation using a comprehensive signal-based approach.
+This system generates **consistent positive alpha** through tactical satellite allocation over a global market baseline (MSCI World) using Bayesian learning from historical performance data.
 
-**Key Philosophy**: Focus on **alpha consistency** (percentage of time with positive rolling alpha), not just maximum total returns.
+**Key Philosophy**: Select 3-7 satellite ETFs monthly based on detrended price oscillators (DPO) with triple exponential moving average (TEMA) filtering and Savitzky-Golay smoothing.
 
 ## Features
 
-- **869 ETFs** tracked with daily price data from 2009
-- **293 signal bases** computed for each ETF (momentum, volatility, risk metrics, etc.)
-- **25 smoothing filters** applied to each signal (7,325 filtered signals)
-- **Signal combination** into features for ML-based prediction
-- **Backtesting engine** for strategy validation
-- **Numba JIT acceleration** for filter computations
-
-## Installation
-
-### Prerequisites
-
-```bash
-pip install pandas numpy scipy matplotlib tqdm justetf-scraping degiro-connector scikit-learn empyrical quantstats ta numba
-```
+- **869+ ETFs** tracked with daily price data since 2009
+- **287 DPO signal bases** with multiple shift divisors (detrended price oscillators using TEMA)
+- **9 Savitzky-Golay filter variants** per signal (~2,500 total filtered signals)
+- **Walk-forward backtesting** with expanding training windows
+- **Bayesian satellite selection** with learned hyperparameters
+- **GPU acceleration** (CuPy/CUDA) for MC simulations and filtering
+- **Numba JIT compilation** for parallel optimization
 
 ## Project Structure
 
 ```
 Core Satellite/
-├── Data Pipeline (pipeline/)
-│   ├── 1_compute_forward_ir.py           # Compute target variable (forward alpha)
-│   ├── 2_compute_signal_bases.py         # Compute 293 raw signals
-│   ├── 3_apply_filters.py                # Apply 25 smoothing filters
-│   ├── 4_precompute_feature_ir.py        # Compute feature-IR matrix
-│   ├── 5_precompute_mc_ir_stats.py       # Compute Bayesian priors
-│   ├── 6_bayesian_strategy_ir.py         # Bayesian satellite selection (equal-weighted)
-│   ├── 7_rule_parameter_discovery.py     # Test portfolio rule parameters (100k MC)
-│   ├── 8_adaptive_allocation_predictor.py # Predict core/satellite weights
-│   ├── models/                           # Trained allocation prediction models
-│   └── main.py                           # Orchestrate full pipeline
+├── pipeline/                          # Main 7-step pipeline
+│   ├── 1_compute_forward_ir.py         # Step 1: Compute target variable (forward IR)
+│   ├── 2_compute_signal_bases.py       # Step 2: Generate 287 DPO signal bases
+│   ├── 3_apply_filters.py              # Step 3: Apply Savitzky-Golay filters
+│   ├── 4_precompute_feature_ir.py      # Step 4: Compute feature-IR matrix
+│   ├── 5_precompute_mc_ir_stats.py     # Step 5: Monte Carlo IR statistics
+│   ├── 6_bayesian_strategy_ir.py       # Step 6: Bayesian satellite selection
+│   ├── 7_generate_monthly_allocation.py # Step 7: Interactive portfolio allocation
+│   ├── main.py                         # Orchestrator (run any step combination)
+│   └── data/                           # Pipeline outputs
+│       ├── forward_alpha_1month.parquet
+│       ├── signals/                    # Signal bases (parquet files)
+│       ├── feature_ir_1month.npz
+│       ├── mc_ir_mean_1month.npz
+│       ├── backtest_results/           # Satellite selections
+│       └── allocation/                 # Monthly portfolio allocations
 │
-├── Signal Libraries (library/)
-│   ├── signal_bases.py               # Signal computation (parallelized, 293 signals)
-│   ├── signal_filters.py             # Filter definitions (Numba-accelerated, 25 filters)
-│   ├── signal_indicators.py          # Cross-sectional feature transformations
-│   └── __init__.py                   # Package exports
+├── library/                            # Signal computation
+│   ├── signal_filters.py               # GPU-accelerated smoothing filters (causal_ema, causal_tema, causal_savgol, etc.)
+│   ├── dpo_enhanced_variants.py        # DPO signal generator (287 variants)
+│   ├── signal_bases.py                 # DEPRECATED: Legacy signal library (228 signals, not used)
+│   ├── signal_indicators.py            # DEPRECATED: Legacy feature engineering (not used)
+│   └── __init__.py
 │
-├── Support Modules (support/)
-│   ├── backtester.py                 # Backtesting engine
-│   ├── degiro_client.py              # DEGIRO API client
-│   ├── etf_database.py               # ETF data storage (SQLite)
-│   ├── etf_fetcher.py                # ETF catalog fetching
-│   ├── price_fetcher.py              # Price data fetching
-│   └── signal_database.py            # Signal data storage (Parquet)
+├── support/                            # Data access & utilities
+│   ├── etf_database.py                 # ETF price database (SQLite)
+│   ├── signal_database.py              # Signal storage (Parquet)
+│   ├── backtester.py                   # DEPRECATED: Superseded by Step 6
+│   ├── degiro_client.py                # DORMANT: Future trading API integration
+│   ├── price_fetcher.py                # DORMANT: Maintenance scripts only
+│   └── etf_fetcher.py                  # DORMANT: Maintenance scripts only
 │
-├── Maintenance (maintenance/)
-│   ├── 1_collect_etf_data.py         # Fetch ETF data
-│   ├── 2_compare_databases.py        # Validate and replace database
-│   └── 3_analyze_data_quality.py     # Data quality analysis
+├── maintenance/                        # Data collection & updates
+│   ├── 1_collect_etf_data.py          # Fetch ETF prices & metadata
+│   ├── 2_compare_databases.py         # Data quality validation
+│   └── 3_analyze_data_quality.py      # Data statistics & analysis
 │
-└── Documentation
-    ├── README.md                     # This file
-    └── CLAUDE.md                     # Detailed project documentation
+└── README.md                           # This file
 ```
 
 ## Quick Start
 
-### 1. Collect ETF Data
+### Prerequisites
 
 ```bash
-cd maintenance
-python 1_collect_etf_data.py
+pip install pandas numpy scipy matplotlib tqdm numba
+# Optional (for GPU acceleration):
+pip install cupy-cuda11x  # Replace 11x with your CUDA version
 ```
 
-This will prompt for your DEGIRO credentials (never stored) and fetch:
-- ETF metadata from DEGIRO
-- Historical prices from JustETF
-- Data filtered from core ETF inception (2009-09-25)
+### Run the Pipeline
 
-### 2. Compute Signal Bases
-
+**Default (all steps 1-6):**
 ```bash
-python 1_compute_signal_bases.py full
+python main.py
 ```
 
-Computes 293 signal bases including:
-- Returns & Alpha (vs core and universe)
-- Momentum (multiple timeframes)
-- Volatility & Risk metrics
-- Beta & Idiosyncratic returns
-- Technical indicators (RSI, MACD, Bollinger)
-- Drawdown metrics
-- And more...
-
-### 3. Apply Filters
-
+**Run specific steps:**
 ```bash
-python 2_apply_filters.py
+python main.py --steps 2,3,4,5,6       # Skip Step 1 (uses pre-computed forward_ir)
+python main.py --only-step 6           # Only satellite selection
+python main.py --steps 1,2,3,4,5,6,7   # Full pipeline including allocation
 ```
 
-Applies 25 smoothing/transformation filters to each signal:
-- Raw passthrough
-- EMA smoothing (5d, 10d, 21d spans)
-- SMA smoothing (5d, 10d, 21d windows)
-- Hull MA (fast adaptive smoothing)
-- KAMA (Kaufman Adaptive MA)
-- Butterworth lowpass filter
-- Z-score normalization (multiple windows)
-- Percentile ranking
-- Rate of change
-- Regime switching detection
-
-### 4. Satellite Selection
-
-```bash
-cd pipeline
-python 6_bayesian_strategy_ir.py
+**Available Arguments:**
+```
+--steps STEPS           Comma-separated list (e.g., "1,2,3,4,5,6")
+--only-step STEP_NUM    Run single step (e.g., "6")
 ```
 
-Runs monthly Bayesian satellite selection with equal-weighted allocation:
-- Selects 3-7 ETFs per month based on predicted Information Ratio
-- Uses Bayesian feature selection with learned hyperparameters (decay, prior strength)
-- Satellites equally weighted (equal-weighting outperforms IR-score weighting)
-- Walk-forward validation with expanding training window
-- Learns feature beliefs from historical alpha data
+## Pipeline Overview
 
-### 5. Portfolio Rule Parameter Discovery
+### Step 1: Compute Forward IR (Target Variable)
+**File**: `pipeline/1_compute_forward_ir.py`
+- Loads ETF prices from database
+- Computes 1-month forward returns and Information Ratio for all ETFs
+- IR = forward_alpha / realized_volatility (consolidates alpha, consistency, risk)
+- **Output**: `data/forward_alpha_1month.parquet`
 
-```bash
-python 7_rule_parameter_discovery.py
+### Step 2: Compute Signal Bases (DPO with TEMA)
+**File**: `pipeline/2_compute_signal_bases.py`
+- Generates 287 DPO (Detrended Price Oscillator) signal bases
+- Uses Triple Exponential Moving Average (TEMA) for detrending
+- DPO formula: `price[t + shift] - TEMA[t]` where shift = period / divisor
+- Divisors: 1.1 to 1.7 (7 variants per DPO period)
+- Periods: 30d to 50d (21 periods)
+- **Output**: `data/signals/*.parquet` + ranking matrix
+
+### Step 3: Apply Filters (Savitzky-Golay Smoothing)
+**File**: `pipeline/3_apply_filters.py`
+- Applies 9 Savitzky-Golay filter variants to each signal base
+- Creates ~2,500 filtered signals (287 bases × 9 filters, minus correlations)
+- Savitzky-Golay preserves signal features better than simple moving averages
+- GPU-accelerated if CuPy available
+- **Output**: `data/signals/filtered_signals/*.parquet` + ranking matrix
+
+### Step 4: Precompute Feature-IR Matrix
+**File**: `pipeline/4_precompute_feature_ir.py`
+- For each signal, evaluates the IR of top-N selected ETFs
+- If top-3 ETFs ranked by signal A have mean IR=0.85, signal A gets IR score 0.85
+- This is the "signal strength" measure used in Step 6
+- **Output**: `data/feature_ir_1month.npz`
+
+### Step 5: Precompute MC Information Ratio Statistics
+**File**: `pipeline/5_precompute_mc_ir_stats.py`
+- Runs Monte Carlo simulations (1M samples per month per feature)
+- Computes IR distribution statistics for Bayesian priors
+- Uses GPU acceleration (CuPy) for speed
+- Estimates how reliably each signal predicts good IR
+- **Output**: `data/mc_ir_mean_1month.npz`
+
+### Step 6: Bayesian Satellite Selection
+**File**: `pipeline/6_bayesian_strategy_ir.py`
+- Walk-forward backtesting with expanding training window
+- For each month T: train on months 0..T-1, test on month T
+- Uses Bayesian learning with decay rate and prior strength hyperparameters
+- Selects 3-7 satellites based on expected IR
+- Equally weights selected satellites
+- **Output**: `data/backtest_results/bayesian_backtest_N*.csv`
+
+### Step 7: Generate Monthly Allocation (Interactive)
+**File**: `pipeline/7_generate_monthly_allocation.py`
+- Interactive script: takes user budget input
+- Generates buy orders for 60/40 core-satellite portfolio
+- Core (60%): MSCI World index (IE00B4L5Y983)
+- Satellites (40%): Top-N from Stage 6, equally weighted
+- Minimizes uninvested cash, uses integer quantities
+- **Output**: `data/allocation/allocation_YYYYMMDD_HHMMSS.csv`
+
+## Data Dependencies
+
+```
+Step 1: Forward IR
+    ↓
+Step 2: Signal Bases → Ranking Matrix
+    ↓
+Step 3: Apply Filters → Ranking Matrix
+    ↓
+Step 4: Feature-IR Matrix (uses Steps 1 & 3)
+    ↓
+Step 5: MC IR Stats (uses Steps 1, 3, 4)
+    ↓
+Step 6: Bayesian Selection (uses Steps 1, 3, 5)
+    ↓
+Step 7: Portfolio Allocation (uses Step 6)
 ```
 
-Tests 100,000 Monte Carlo portfolio rule combinations:
-- Evaluates 5 rule parameters (core_weight, rebalance_threshold, etc.)
-- Identifies which parameters significantly affect Information Ratio
-- Discovers that only core_weight matters (correlation: -0.39)
-- Output: parameter sensitivity analysis and optimal distributions
-
-### 6. Predict Allocation
-
+**To skip Step 1** (if forward_ir already computed):
 ```bash
-python 8_adaptive_allocation_predictor.py
-```
-
-Trains predictive models for optimal portfolio allocation:
-- **Phase 1 (Training)**: Learns from 464 months of historical Stage 6 selections
-- **Phase 2 (Prediction)**: Predicts optimal allocation for any new satellite selection:
-  - Optimal core/satellite split (R² = 0.973)
-  - Individual satellite weights within satellite allocation (R² = 0.620)
-- Models saved to: `pipeline/models/`
-- Usage: `predictor.predict(selected_isins, alpha_df, target_date)`
-
-## Core Concepts
-
-### Core-Satellite Strategy
-
-- **Core**: iShares Core MSCI World (IE00B4L5Y983) - Global diversification
-- **Satellites**: Regional/thematic ETFs for tactical allocation
-- **Satellite Allocation**: Equal weighting across selected satellites
-  - Tested IR-score weighting and score² weighting, both showed negligible improvement
-  - Equal weighting is simpler and equally effective for selected universe
-
-### Signal-Based Alpha Generation
-
-The system generates alpha predictions through:
-
-1. **Raw Signals** (293): Technical and fundamental indicators
-2. **Filtered Signals** (7,325): Smoothed/transformed variants
-3. **Features**: Combined signals for ML models
-4. **Predictions**: Expected alpha for each ETF
-5. **Allocation**: Overweight predicted outperformers
-
-### Alpha Consistency
-
-**Primary metric**: % of time with positive rolling alpha
-
-- Better: +0.5% alpha 80% of the time
-- Worse: +3% alpha 50% of the time
-
-### Satellite Allocation Strategy
-
-**Key Finding**: Equal weighting of selected satellites is optimal.
-
-Tested three allocation strategies for selected satellites:
-1. **Equal weight** (Stage 6): Baseline approach
-2. **IR-score weight**: Weight by selection score (negligible improvement: +0.03%)
-3. **Score² weight**: Squared weighting for concentration (negligible improvement: +0.04%)
-
-**Result**: All approaches perform virtually identically, suggesting:
-- The satellite selection (which ETFs to pick) is the critical factor
-- How those satellites are weighted has minimal impact once selected
-- **Decision**: Use equal weighting for simplicity and interpretability
-
-## Signal Categories
-
-| Category | Signals | Description |
-|----------|---------|-------------|
-| Returns | 8 | Daily returns, alpha vs core/universe |
-| Momentum | 28 | Multi-timeframe momentum, skip-month |
-| Relative Strength | 16 | RS vs core and universe |
-| Volatility | 20 | Rolling volatility, realized vol |
-| Risk Metrics | 24 | Sharpe, Sortino, Calmar ratios |
-| Beta/Alpha | 16 | Rolling beta, idiosyncratic returns |
-| Technical | 40+ | RSI, MACD, Bollinger, etc. |
-| Drawdown | 20 | Max DD, recovery metrics |
-| Capture Ratios | 8 | Up/Down market capture |
-| Autocorrelation | 16 | Return persistence |
-| Seasonality | 15 | Month-of-year effects |
-
-## Monthly Update Workflow
-
-```bash
-# 1. Fetch new price data (creates etf_database_new.db)
-cd maintenance
-python 1_collect_etf_data.py
-
-# 2. Compare databases and replace if valid (prompts y/n, creates dated backup)
-python 2_compare_databases.py
-
-# 3. Analyze data quality
-python 3_analyze_data_quality.py
-
-# 4. Recompute signals and run satellite selection
-cd ../pipeline
-python 2_compute_signal_bases.py incremental
-python 3_apply_filters.py
-python 4_precompute_feature_ir.py
-python 5_precompute_mc_ir_stats.py
-python 6_bayesian_strategy_ir.py
+python main.py --steps 2,3,4,5,6
 ```
 
 ## Configuration
@@ -236,59 +179,143 @@ python 6_bayesian_strategy_ir.py
 ### Core ETF
 ```python
 CORE_ISIN = 'IE00B4L5Y983'  # iShares Core MSCI World
-CORE_INCEPTION_DATE = '2009-09-25'
 ```
 
-### Default Parameters
+### Portfolio Allocation
 ```python
-INITIAL_INVESTMENT = 50000   # EUR
-MONTHLY_CONTRIBUTION = 1500  # EUR
-LOOKBACK_DAYS = 252          # 12 months
-REBALANCE_FREQUENCY = 3      # Quarterly
+CORE_WEIGHT = 0.60         # Core allocation
+SATELLITE_WEIGHT = 0.40    # Satellite allocation
+N_SATELLITES = [3,4,5,6,7] # Test different portfolio sizes
 ```
 
-## Data Sources
+### Signal Computation
+```python
+# Step 2: DPO signal bases
+DPO_PERIODS = range(30, 51)              # 30-50 days
+TEMA_SHIFT_DIVISORS = [1.1, 1.2, ..., 1.7]  # 7 shift variants
 
-- **DEGIRO**: ETF catalog and metadata
-- **JustETF**: Historical NAV prices (more complete than DEGIRO)
-- **iShares**: Regional composition weights
+# Step 3: Savitzky-Goyal filters
+FILTER_VARIANTS = 9  # 9 different Savgol window configurations
+```
+
+### Monte Carlo Settings (Step 5)
+```python
+MC_SAMPLES = 1_000_000   # Per month per feature
+MIN_TRAINING_MONTHS = 36  # Minimum backtest history
+```
+
+## Key Concepts
+
+### DPO (Detrended Price Oscillator)
+- Removes trend from price to isolate oscillations
+- Formula: `price[t + shift] - MA[t]`
+- Forward-looking shift creates predictive signal
+- TEMA chosen after testing 12 MA types (94-100% selection rate)
+
+### Information Ratio (IR)
+- Measures risk-adjusted alpha generation
+- `IR = mean(alpha) / std(alpha)`
+- Consolidates: alpha magnitude, consistency, and risk control
+- Used as target variable for entire pipeline
+
+### Bayesian Learning
+- Learns which signals reliably predict good future IR
+- Uses decay rate: older months weighted less
+- Uses prior strength: confidence in model before seeing data
+- Walk-forward: expands training window each month
+
+### Walk-Forward Backtesting
+- **No look-ahead bias**: Train on months with known outcomes only
+- Month T-1 result is known before predicting month T
+- Expanding window: each month adds 1 new training observation
+- Typical: 36+ months training, then 50+ months of out-of-sample testing
 
 ## Performance
 
-Signal computation is parallelized for performance:
-- Uses all available CPU cores via multiprocessing
-- Numba JIT compilation for filter operations
-- Processes ~293 signals × 869 ETFs × 5,951 days
-- Signal base computation: ~10-15 minutes
-- Filter application: ~80 minutes (7,325 filtered signals)
+### Signal Computation Time
+- Step 2 (287 DPO bases): ~5-10 minutes
+- Step 3 (9 Savgol variants): ~10-20 minutes
+- Step 4 (Feature-IR): ~2-5 minutes
+- Step 5 (MC stats, GPU): ~10-30 minutes (CPU: hours)
 
-## Documentation
+### Optimization
+- **Numba JIT**: Parallel loops in Steps 4, 5, 6
+- **GPU Acceleration**: CuPy in Step 3 (filter application), Step 5 (MC)
+- **Vectorization**: NumPy/Pandas across all steps
+- **Storage**: Parquet format (10-50x faster than SQLite for analytics)
 
-For comprehensive documentation including:
-- Detailed signal descriptions
-- Filter explanations
-- Backtesting API
-- Strategy development guide
+## Maintenance
 
-See **[CLAUDE.md](CLAUDE.md)**
+### Monthly Update
+```bash
+cd maintenance
+python 1_collect_etf_data.py     # Fetch new prices
+python 2_compare_databases.py    # Validate & swap
+
+cd ../pipeline
+python main.py --steps 2,3,4,5,6  # Recompute signals & selection
+```
+
+### Data Quality
+```bash
+cd maintenance
+python 3_analyze_data_quality.py  # Check for gaps, outliers
+```
+
+## Unused/Deprecated Components
+
+These modules exist but are **not used** in the current pipeline:
+
+| File | Status | Reason |
+|------|--------|--------|
+| `signal_bases.py` | DEPRECATED | Replaced by DPO-focused approach |
+| `signal_indicators.py` | DEPRECATED | Cross-sectional features not used |
+| `backtester.py` | SUPERSEDED | Functionality in Step 6 |
+| `price_fetcher.py` | DORMANT | Maintenance scripts only |
+| `etf_fetcher.py` | DORMANT | Maintenance scripts only |
+| `degiro_client.py` | NOT INTEGRATED | Future execution feature |
+
+Can be safely removed if not needed for maintenance workflows.
+
+## Troubleshooting
+
+### Step 1 Unicode Error
+**Issue**: `UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'`
+**Solution**: Skip Step 1, use pre-computed data
+```bash
+python main.py --steps 2,3,4,5,6
+```
+
+### Step 5 GPU Error
+**Issue**: `CuPy not installed` or CUDA mismatch
+**Solution**: Falls back to CPU (slower), or install matching CuPy version
+```bash
+pip install cupy-cuda11x  # Replace 11x with your CUDA version
+```
+
+### Missing Forward IR File
+**Issue**: `FileNotFoundError: forward_alpha_1month.parquet`
+**Solution**: Run Step 1 first
+```bash
+python main.py --only-step 1
+```
 
 ## License & Disclaimer
 
-This project is for **educational and research purposes only**. Not financial advice.
+**Educational and research purposes only.** Not financial advice.
 
-- Always consult a qualified financial advisor before making investment decisions
-- Past performance does not guarantee future results
-- The authors are not responsible for any financial losses
+- Consult a qualified financial advisor before investing
+- Past performance ≠ future results
+- Authors not responsible for financial losses
 
-## Contributing
+## Next Steps
 
-Contributions welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Submit a pull request
+- Monitor backtest results in `data/backtest_results/`
+- Generate monthly allocations via Step 7
+- Analyze parameter stability across months
+- Consider portfolio-level constraints (max 10% per ETF, etc.)
 
-## Acknowledgments
+---
 
-- DEGIRO for API access
-- JustETF for price data
-- Academic references in CLAUDE.md
+**Last Updated**: January 2026
+**Version**: 1.0 - Core-Satellite Bayesian Selection
