@@ -92,10 +92,9 @@ def compute_dpo_variants_generator(
     # 35d:  ~1.75 months - frequently selected
     # 40d:  ~2 months - frequently selected
     # 45d:  ~2.25 months - historically good
-    # 50d:  ~2.5 months - previously upper bound, now expanded
-    # 55d:  ~2.75 months - extended range
-    # 60d:  ~3 months - new upper bound (appeared in top performers)
-    dpo_periods = list(range(30, 61))  # 30, 31, 32, ..., 60 (31 periods)
+    # 30-100d range with step of 3 (24 periods)
+    # Reduced redundancy while maintaining coverage
+    dpo_periods = list(range(30, 102, 3))  # 30, 33, 36, ..., 99 (24 periods)
 
     # TEMA shift divisors to optimize lag-alignment
     # TEMA's lower lag (period/4-5) vs standard shift (period/2+1) creates misalignment
@@ -138,7 +137,7 @@ def compute_dpo_variants_generator(
 
 def count_dpo_variants() -> int:
     """Count total DPO variants that will be generated."""
-    dpo_periods = list(range(30, 61))  # 30 to 60 inclusive (31 periods)
+    dpo_periods = list(range(30, 102, 3))  # 30 to 100 inclusive, step 3 (24 periods)
     tema_shifts = 10       # shift_1_1, shift_1_2, shift_1_3, shift_1_4, shift_1_5, shift_1_6, shift_1_7, shift_1_8, shift_1_9, shift_2_0
     return len(dpo_periods) * tema_shifts
 

@@ -95,7 +95,7 @@ HP_UPDATE_WEIGHT = 1.0
 PREDICTION_SUCCESS_THRESHOLD = 1.0
 
 # Feature selection parameters
-MIN_ENSEMBLE_SIZE = 3  # Force at least 3 features for stability
+MIN_ENSEMBLE_SIZE = 8  # Force at least 3 features for stability
 MAX_ENSEMBLE_SIZE = 10
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
