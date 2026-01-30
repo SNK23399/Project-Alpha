@@ -35,7 +35,6 @@ Usage:
 
 import sys
 from pathlib import Path
-from collections import defaultdict
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -161,11 +160,10 @@ def evaluate_all_features_all_dates(feature_ir, n_satellites, test_start_idx, n_
 @njit(cache=True)
 def aggregate_batch_numba(alphas, ensemble_indices, ensemble_sizes,
                           candidate_offsets, sample_to_job, all_candidates,
-                          total_counts, alpha_sums, alpha_sq_sums,
-                          total_counts_by_ens, alpha_sums_by_ens, alpha_sq_sums_by_ens):
+                          total_counts, alpha_sums, alpha_sq_sums):
     """
     Numba-accelerated aggregation of MC batch results.
-    Accumulates alpha statistics (mean and variance) for both N and ensemble size.
+    Accumulates alpha statistics (mean and variance).
 
     Note: Not using parallel=True because we're updating shared arrays
     and need atomic-like behavior. The GPU kernel is the parallel part.
@@ -195,15 +193,8 @@ def aggregate_batch_numba(alphas, ensemble_indices, ensemble_sizes,
             feat_idx = all_candidates[global_cand_idx]
 
             total_counts[job_idx, feat_idx] += 1
-
-            # Track alpha statistics (for mean and std)
             alpha_sums[job_idx, feat_idx] += alpha_val
             alpha_sq_sums[job_idx, feat_idx] += alpha_val * alpha_val
-
-            # Also track by ensemble size for separate analysis
-            total_counts_by_ens[job_idx, feat_idx, ens_size] += 1
-            alpha_sums_by_ens[job_idx, feat_idx, ens_size] += alpha_val
-            alpha_sq_sums_by_ens[job_idx, feat_idx, ens_size] += alpha_val * alpha_val
 
 
 # ============================================================
@@ -475,14 +466,9 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     alpha_sums = np.zeros((n_jobs, n_features), dtype=np.float64)
     alpha_sq_sums = np.zeros((n_jobs, n_features), dtype=np.float64)
 
-    # Track stats by ensemble size (number of features in ensemble)
+    # Ensemble sizes choices for random sampling
     max_ens_size = max(MC_ENSEMBLE_SIZES) + 1
     ensemble_sizes_choices = np.array(MC_ENSEMBLE_SIZES, dtype=np.int64)
-
-    # Accumulators for ensemble size analysis
-    total_counts_by_ens = np.zeros((n_jobs, n_features, max_ens_size), dtype=np.int64)
-    alpha_sums_by_ens = np.zeros((n_jobs, n_features, max_ens_size), dtype=np.float64)
-    alpha_sq_sums_by_ens = np.zeros((n_jobs, n_features, max_ens_size), dtype=np.float64)
 
     # Transfer static data to GPU once (GPU is guaranteed available here)
     rankings_gpu = cp.asarray(rankings, dtype=cp.float64)
@@ -533,24 +519,11 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     prev_prior_means_max = None  # Cache denominator for convergence check
     converged = False
     last_pct_change = 100.0  # Track for progress bar
-    first_batch_check = True  # Only print newline once
-    # Check convergence every 5M samples (reduces nanmax overhead significantly)
-    convergence_check_freq = max(10, 5_000_000 // MC_BATCH_SIZE)
-
-    # Timing instrumentation
-    time_gpu_random = 0.0
-    time_kernel = 0.0
-    time_transfer = 0.0
-    time_aggregate = 0.0
-    time_convergence = 0.0
-    time_other = 0.0
-    batch_count = 0
+    # Check convergence every batch for detailed progress
+    convergence_check_freq = 1
 
     while total_samples_run < MC_MAX_SAMPLES and not converged:
-        t_start = time.time()
-
         # Generate random ensemble sizes (CuPy doesn't support 'out' parameter)
-        t_gpu_start = time.time()
         ensemble_sizes_gpu = cp.random.choice(
             ensemble_sizes_choices_gpu, size=(batch_total,)
         ).astype(cp.int32)
@@ -558,13 +531,11 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
         ensemble_indices_gpu = cp.random.randint(
             0, 2**31 - 1, size=(batch_total, max_ens_size), dtype=cp.int64
         )
-        time_gpu_random += time.time() - t_gpu_start
 
         # Reuse pre-allocated arrays (avoid GPU transfers and memory allocation)
         out_alphas.fill(0)  # Reset from previous batch
 
         # Launch kernel
-        t_kernel_start = time.time()
         threads = GPU_BLOCK_SIZE
         blocks = (batch_total + threads - 1) // threads
 
@@ -576,24 +547,18 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
             n_satellites, out_alphas
         )
         cuda.synchronize()
-        time_kernel += time.time() - t_kernel_start
 
         # Transfer back
-        t_transfer_start = time.time()
         alphas_np = cp.asnumpy(out_alphas)
         ensemble_indices_np = cp.asnumpy(ensemble_indices_gpu)
         ensemble_sizes_np = cp.asnumpy(ensemble_sizes_gpu)
-        time_transfer += time.time() - t_transfer_start
 
         # Aggregate this batch using Numba (fast)
-        t_agg_start = time.time()
         aggregate_batch_numba(
             alphas_np, ensemble_indices_np, ensemble_sizes_np,
             candidate_offsets, sample_to_job_batch, all_candidates,
-            total_counts, alpha_sums, alpha_sq_sums,
-            total_counts_by_ens, alpha_sums_by_ens, alpha_sq_sums_by_ens
+            total_counts, alpha_sums, alpha_sq_sums
         )
-        time_aggregate += time.time() - t_agg_start
 
         # Free batch GPU arrays immediately (don't wait for garbage collection)
         del ensemble_sizes_gpu, ensemble_indices_gpu
@@ -606,16 +571,9 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
 
         total_samples_run += batch_total
         batch_idx += 1
-        batch_count += 1
-
-        # Print periodic progress with timing
-        if batch_idx % 50 == 0:
-            avg_per_batch = (time_kernel + time_transfer + time_aggregate) / batch_count if batch_count > 0 else 0
-            print(f"    Batch {batch_idx}: {total_samples_run:,} samples | Avg: {avg_per_batch*1000:.2f}ms/batch | GPU: {time_gpu_random/batch_count*1000:.2f}ms + Kernel: {time_kernel/batch_count*1000:.2f}ms + Xfer: {time_transfer/batch_count*1000:.2f}ms + Agg: {time_aggregate/batch_count*1000:.2f}ms", flush=True)
 
         # CHECK CONVERGENCE after minimum samples (but only every N batches to reduce overhead)
         if total_samples_run >= MC_MIN_SAMPLES and batch_idx % convergence_check_freq == 0:
-            t_conv_start = time.time()
             # Compute current prior means using pre-allocated array (vectorized, no Python loops)
             current_prior_means_array.fill(np.nan)  # Reset to NaN
             np.divide(
@@ -631,35 +589,16 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
                 pct_change = (max_change / (prev_prior_means_max + 1e-10)) * 100
                 last_pct_change = pct_change  # Track for progress bar
 
-                newline = "\n" if first_batch_check else ""
-                print(f"{newline}    Batch {batch_idx}: {total_samples_run:,} samples | Max change: {pct_change:.4f}%", end='\r')
-                first_batch_check = False
+                print(f"    Batch {batch_idx}: {total_samples_run:,} samples | Max change: {pct_change:.4f}%", end='\r')
 
                 if pct_change < MC_CONVERGENCE_THRESHOLD * 100:
                     converged = True
-                    time_convergence += time.time() - t_conv_start
                     break
 
             # Store for next convergence check (copy is cheap at ~92KB, nanmax is the real bottleneck)
             prev_prior_means = current_prior_means_array.copy()
             # Cache the denominator for next iteration (avoids redundant nanmax call)
             prev_prior_means_max = np.nanmax(np.abs(prev_prior_means))
-            time_convergence += time.time() - t_conv_start
-        else:
-            time_other += time.time() - t_start
-
-    # Print timing breakdown
-    total_time = time_gpu_random + time_kernel + time_transfer + time_aggregate + time_convergence + time_other
-    if batch_count > 0:
-        print(f"\n", flush=True)
-        print(f"    [TIMING] {batch_count} batches, {total_samples_run:,} total samples:", flush=True)
-        print(f"      GPU Random:    {time_gpu_random:7.2f}s ({100*time_gpu_random/total_time:5.1f}%) - {time_gpu_random/batch_count*1000:5.2f}ms/batch", flush=True)
-        print(f"      Kernel:        {time_kernel:7.2f}s ({100*time_kernel/total_time:5.1f}%) - {time_kernel/batch_count*1000:5.2f}ms/batch", flush=True)
-        print(f"      GPU Transfer:  {time_transfer:7.2f}s ({100*time_transfer/total_time:5.1f}%) - {time_transfer/batch_count*1000:5.2f}ms/batch", flush=True)
-        print(f"      Aggregation:   {time_aggregate:7.2f}s ({100*time_aggregate/total_time:5.1f}%) - {time_aggregate/batch_count*1000:5.2f}ms/batch", flush=True)
-        print(f"      Convergence:   {time_convergence:7.2f}s ({100*time_convergence/total_time:5.1f}%)", flush=True)
-        print(f"      Other:         {time_other:7.2f}s ({100*time_other/total_time:5.1f}%)", flush=True)
-        print(f"      TOTAL:         {total_time:7.2f}s", flush=True)
 
     # Cleanup GPU memory
     del rankings_gpu, alpha_matrix_gpu, alpha_valid_gpu
@@ -695,27 +634,7 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     mc_ir_mean[valid_mask] = means[valid_mask]
     mc_ir_std[valid_mask] = stds[valid_mask]
 
-    # Compute ensemble size statistics (vectorized for performance)
-    ens_stats = {}
-    for ens_size in ensemble_sizes_choices:
-        # Vectorized computation: avoid nested Python loops
-        counts = total_counts_by_ens[:, :, ens_size]
-        valid_mask = counts >= MC_MIN_SAMPLES_JOB
-
-        if np.any(valid_mask):
-            # Compute means only for valid entries
-            sums = alpha_sums_by_ens[:, :, ens_size]
-            means = np.divide(sums, counts, where=valid_mask, out=np.full_like(sums, np.nan))
-            valid_means = means[valid_mask]
-
-            if len(valid_means) > 0:
-                ens_stats[ens_size] = {
-                    'mean': np.nanmean(valid_means),
-                    'min': np.nanmin(valid_means),
-                    'max': np.nanmax(valid_means),
-                }
-
-    return mc_ir_mean, mc_ir_std, last_pct_change, ens_stats
+    return mc_ir_mean, mc_ir_std, last_pct_change
 
 
 def precompute_all_mc_ir_stats(data):
@@ -753,15 +672,14 @@ def precompute_all_mc_ir_stats(data):
     candidate_masks = {}
     inverted_masks = {}
     stats_summary = []
-    ensemble_size_stats_all = {}  # Track stats by ensemble size across all N values
 
     pbar = tqdm(N_SATELLITES_TO_PRECOMPUTE, desc="N values", ncols=120)
     for n_satellites in pbar:
         # Step 1: Find candidates
         cand_mask, inv_mask = precompute_candidates_all_dates(data, n_satellites, test_start_idx)
 
-        # Step 2: Run MC (returns IR mean, std, final convergence change%, and ensemble size stats)
-        mc_ir_mean, mc_ir_std, last_pct_change, ens_stats = run_mc_for_n(
+        # Step 2: Run MC (returns IR mean, std, and final convergence change%)
+        mc_ir_mean, mc_ir_std, last_pct_change = run_mc_for_n(
             data, n_satellites, test_start_idx, cand_mask, inv_mask
         )
 
@@ -792,52 +710,21 @@ def precompute_all_mc_ir_stats(data):
                 valid_ir.mean(), valid_ir.min(), valid_ir.max()
             ))
 
-        # Store ensemble size stats
-        ensemble_size_stats_all[n_satellites] = ens_stats
-
     # Print summary after progress bar completes
     print("\nIR Statistics per N:")
     for stats in stats_summary:
         (n_sat, mean_ir, min_ir, max_ir) = stats
         print(f"  N={n_sat}: IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}]")
 
-    # Aggregate and print ensemble size statistics (vectorized)
-    print("\nIR Statistics per Ensemble Size (aggregated across all N values):")
-
-    # Build aggregation in one pass using defaultdict for efficiency
-    ensemble_size_aggregated = defaultdict(lambda: {'means': [], 'mins': [], 'maxs': []})
-
-    for ens_stats in ensemble_size_stats_all.values():
-        for ens_size, stats in ens_stats.items():
-            ensemble_size_aggregated[ens_size]['means'].append(stats['mean'])
-            ensemble_size_aggregated[ens_size]['mins'].append(stats['min'])
-            ensemble_size_aggregated[ens_size]['maxs'].append(stats['max'])
-
-    # Convert to numpy arrays and compute aggregates in bulk
-    ens_size_summary = []
-    for ens_size in sorted(ensemble_size_aggregated.keys()):
-        agg = ensemble_size_aggregated[ens_size]
-        # Use np.array for faster aggregation
-        means_arr = np.array(agg['means'], dtype=np.float32)
-        mins_arr = np.array(agg['mins'], dtype=np.float32)
-        maxs_arr = np.array(agg['maxs'], dtype=np.float32)
-
-        mean_ir = np.nanmean(means_arr)
-        min_ir = np.nanmin(mins_arr)
-        max_ir = np.nanmax(maxs_arr)
-        ens_size_summary.append((ens_size, mean_ir, min_ir, max_ir))
-        print(f"  Ens={ens_size}: IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}]")
-
-    return mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks, test_start_idx, ensemble_size_stats_all, ens_size_summary
+    return mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks, test_start_idx
 
 
 def save_mc_ir_stats(mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks,
-                     test_start_idx, dates, feature_names, ensemble_size_stats_all=None, ens_size_summary=None):
+                     test_start_idx, dates, feature_names):
     """
     Save MC IR statistics for Bayesian belief setting.
 
     Saves Information Ratio mean/std estimates for each feature at each test date.
-    Also saves ensemble size statistics if provided.
     Note: Hitrates are no longer computed.
     """
     output_file = DATA_DIR / f'mc_ir_mean_{HOLDING_MONTHS}month.npz'
@@ -872,25 +759,6 @@ def save_mc_ir_stats(mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks,
 
     print(f"\n[SAVED] {output_file}")
     print(f"  Size: {output_file.stat().st_size / 1024 / 1024:.1f} MB")
-
-    # Save ensemble size statistics separately
-    if ens_size_summary:
-        ens_output_file = DATA_DIR / f'mc_ensemble_size_stats_{HOLDING_MONTHS}month.npz'
-        ens_sizes = np.array([s[0] for s in ens_size_summary], dtype=np.int32)
-        ens_ir_means = np.array([s[1] for s in ens_size_summary], dtype=np.float32)
-        ens_ir_mins = np.array([s[2] for s in ens_size_summary], dtype=np.float32)
-        ens_ir_maxs = np.array([s[3] for s in ens_size_summary], dtype=np.float32)
-
-        np.savez_compressed(
-            ens_output_file,
-            ensemble_sizes=ens_sizes,
-            ir_means=ens_ir_means,
-            ir_mins=ens_ir_mins,
-            ir_maxs=ens_ir_maxs,
-            detailed_stats=ensemble_size_stats_all
-        )
-        print(f"[SAVED] {ens_output_file}")
-        print(f"  Size: {ens_output_file.stat().st_size / 1024 / 1024:.1f} MB")
 
 
 def main():
@@ -936,14 +804,12 @@ def main():
 
     start_time = time.time()
     (mc_ir_means, mc_ir_stds,
-     candidate_masks, inverted_masks, test_start_idx,
-     ensemble_size_stats_all, ens_size_summary) = precompute_all_mc_ir_stats(data)
+     candidate_masks, inverted_masks, test_start_idx) = precompute_all_mc_ir_stats(data)
     elapsed = time.time() - start_time
 
     save_mc_ir_stats(mc_ir_means, mc_ir_stds,
                      candidate_masks, inverted_masks, test_start_idx,
-                     data['dates'], data['feature_names'],
-                     ensemble_size_stats_all, ens_size_summary)
+                     data['dates'], data['feature_names'])
 
     print(f"\n{'='*120}")
     print("STEP 5 COMPLETE")
