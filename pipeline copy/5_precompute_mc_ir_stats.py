@@ -65,7 +65,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_PRECOMPUTE = [1, 2, 3, 4, 5]
+N_SATELLITES_TO_PRECOMPUTE = [3, 4, 5]
 MIN_TRAINING_MONTHS = 36
 # Note: No pre-filtering - all 7,618 features evaluated for true Bayesian learning
 DECAY_HALF_LIFE_MONTHS = 54
@@ -74,9 +74,9 @@ DECAY_HALF_LIFE_MONTHS = 54
 # Instead of fixed samples, run until priors stabilize
 # Since MC is GPU-fast with precomputed data, use tight threshold for true convergence
 MC_BATCH_SIZE = 500_000  # Samples per batch
-MC_CONVERGENCE_THRESHOLD = 0.001  # 0.1% max change in prior means (tight - ensures true convergence)
+MC_CONVERGENCE_THRESHOLD = 0.0002  # % max change in prior means (tight - ensures true convergence)
 MC_MIN_SAMPLES = 1_000_000  # Minimum before checking convergence
-MC_MAX_SAMPLES = 100_000_000  # Safety limit (generous since MC is fast)
+MC_MAX_SAMPLES = 3_000_000_000  # Safety limit (generous since MC is fast)
 MC_FALLBACK_SAMPLES = 3_000_000  # If convergence fails, use this
 
 MC_ENSEMBLE_SIZES = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -489,8 +489,8 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     batch_idx = 0
     prev_prior_means = None
     converged = False
-
-    print(f"\n  Running adaptive MC until convergence (threshold={MC_CONVERGENCE_THRESHOLD*100:.2f}%)")
+    last_pct_change = 100.0  # Track for progress bar
+    first_batch_check = True  # Only print newline once
 
     while total_samples_run < MC_MAX_SAMPLES and not converged:
         # Calculate samples for this batch based on jobs
@@ -567,15 +567,15 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
             if prev_prior_means is not None:
                 max_change = np.nanmax(np.abs(current_prior_means - prev_prior_means))
                 pct_change = (max_change / (np.nanmax(np.abs(prev_prior_means)) + 1e-10)) * 100
+                last_pct_change = pct_change  # Track for progress bar
 
-                print(f"  Batch {batch_idx}: {total_samples_run:,} samples | Max change: {pct_change:.4f}%")
+                newline = "\n" if first_batch_check else ""
+                print(f"{newline}    Batch {batch_idx}: {total_samples_run:,} samples | Max change: {pct_change:.4f}%", end='\r', flush=True)
+                first_batch_check = False
 
                 if pct_change < MC_CONVERGENCE_THRESHOLD * 100:
-                    print(f"  CONVERGED! (change {pct_change:.4f}% < threshold {MC_CONVERGENCE_THRESHOLD*100:.2f}%)")
                     converged = True
                     break
-            else:
-                print(f"  Batch {batch_idx}: {total_samples_run:,} samples | Checking convergence...")
 
             prev_prior_means = current_prior_means.copy()
 
@@ -601,8 +601,7 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
                     # Ensure non-negative due to numerical precision
                     mc_ir_std[job_idx, feat_idx] = np.sqrt(max(0, variance))
 
-    print(f"  Final: {total_samples_run:,} samples, converged={converged}")
-    return mc_ir_mean, mc_ir_std
+    return mc_ir_mean, mc_ir_std, last_pct_change
 
 
 def precompute_all_mc_ir_stats(data):
@@ -641,14 +640,18 @@ def precompute_all_mc_ir_stats(data):
     inverted_masks = {}
     stats_summary = []
 
-    for n_satellites in tqdm(N_SATELLITES_TO_PRECOMPUTE, desc="N values", ncols=120):
+    pbar = tqdm(N_SATELLITES_TO_PRECOMPUTE, desc="N values", ncols=120)
+    for n_satellites in pbar:
         # Step 1: Find candidates
         cand_mask, inv_mask = precompute_candidates_all_dates(data, n_satellites, test_start_idx)
 
-        # Step 2: Run MC (returns IR mean and std only)
-        mc_ir_mean, mc_ir_std = run_mc_for_n(
+        # Step 2: Run MC (returns IR mean, std, and final convergence change%)
+        mc_ir_mean, mc_ir_std, last_pct_change = run_mc_for_n(
             data, n_satellites, test_start_idx, cand_mask, inv_mask
         )
+
+        # Update progress bar with convergence info
+        pbar.set_postfix({"N": n_satellites, "max_change%": f"{last_pct_change:.4f}"})
 
         # Store (expand to full date range)
         full_ir_mean = np.full((n_dates, n_features), np.nan, dtype=np.float32)

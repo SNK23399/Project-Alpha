@@ -82,6 +82,9 @@ GPU_BLOCK_SIZE = 256
 FORCE_RECOMPUTE = True
 DATA_DIR = Path(__file__).parent / 'data'
 
+# Random seed for deterministic MC simulations
+MC_SEED = 42  # Set to None for non-deterministic results
+
 
 # ============================================================
 # NUMBA CPU FUNCTIONS
@@ -479,6 +482,11 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     candidate_offsets_gpu = cp.asarray(candidate_offsets, dtype=cp.int64)
     job_train_ends_gpu = cp.asarray(job_train_ends, dtype=cp.int64)
 
+    # Set random seed for deterministic MC simulations
+    if MC_SEED is not None:
+        cp.random.seed(MC_SEED)
+        np.random.seed(MC_SEED)
+
     for batch_idx in range(n_batches):
         batch_start = batch_idx * BATCH_SIZE
         batch_end = min((batch_idx + 1) * BATCH_SIZE, total_samples)
@@ -556,6 +564,15 @@ def precompute_all_mc_ir_stats(data):
     Runs Monte Carlo simulations to estimate IR mean and standard deviation.
     Note: Hitrate computation removed - only IR statistics are computed.
     """
+    # Initialize random seeds for determinism
+    if MC_SEED is not None:
+        np.random.seed(MC_SEED)
+        try:
+            import cupy as cp
+            cp.random.seed(MC_SEED)
+        except ImportError:
+            pass
+
     dates = data['dates']
     feature_names = data['feature_names']
     n_dates = len(dates)
@@ -658,6 +675,18 @@ def save_mc_ir_stats(mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks,
 
 
 def main():
+    # Initialize random seeds for determinism
+    if MC_SEED is not None:
+        np.random.seed(MC_SEED)
+        try:
+            import cupy as cp
+            cp.random.seed(MC_SEED)
+        except ImportError:
+            pass
+        print(f"Random seed set to {MC_SEED} for deterministic MC simulations")
+    else:
+        print("Random seed not set - MC simulations will be non-deterministic")
+
     print("=" * 120)
     print("STEP 5: PRECOMPUTE MC INFORMATION RATIO STATISTICS")
     print("=" * 120)
