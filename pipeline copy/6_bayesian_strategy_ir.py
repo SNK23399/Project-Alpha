@@ -95,6 +95,7 @@ HP_UPDATE_WEIGHT = 1.0
 PREDICTION_SUCCESS_THRESHOLD = 1.0
 
 # Feature selection parameters
+MIN_ENSEMBLE_SIZE = 3  # Force at least 3 features for stability
 MAX_ENSEMBLE_SIZE = 10
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
@@ -721,10 +722,14 @@ def select_features_greedy_bayesian(belief_state: BeliefState,
                 best_improvement = improvement
                 best_candidate = candidate
 
-        # Stop if improvement threshold not met
-        if best_candidate is not None and best_improvement > greedy_improvement_thresh:
-            selected.append(best_candidate)
-            remaining.remove(best_candidate)
+        # Continue if: (1) below MIN_ENSEMBLE_SIZE OR (2) improvement > threshold
+        # Stop only when: above MIN_ENSEMBLE_SIZE AND improvement <= threshold
+        if best_candidate is not None:
+            if len(selected) < MIN_ENSEMBLE_SIZE or best_improvement > greedy_improvement_thresh:
+                selected.append(best_candidate)
+                remaining.remove(best_candidate)
+            else:
+                break
         else:
             break
 

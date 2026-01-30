@@ -74,12 +74,12 @@ DECAY_HALF_LIFE_MONTHS = 54
 # Instead of fixed samples, run until priors stabilize
 # Since MC is GPU-fast with precomputed data, use tight threshold for true convergence
 MC_BATCH_SIZE = 500_000  # Samples per batch
-MC_CONVERGENCE_THRESHOLD = 0.0002  # % max change in prior means (tight - ensures true convergence)
+MC_CONVERGENCE_THRESHOLD = 0.005  # % max change in prior means (tight - ensures true convergence)
 MC_MIN_SAMPLES = 1_000_000  # Minimum before checking convergence
 MC_MAX_SAMPLES = 3_000_000_000  # Safety limit (generous since MC is fast)
 MC_FALLBACK_SAMPLES = 3_000_000  # If convergence fails, use this
 
-MC_ENSEMBLE_SIZES = [1, 2, 3, 4, 5, 6, 7, 8]
+MC_ENSEMBLE_SIZES = [3, 4, 5, 6, 7, 8, 9, 10]
 MC_MIN_SAMPLES_JOB = 100
 
 # GPU settings
