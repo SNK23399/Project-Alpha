@@ -6,15 +6,86 @@ Extracts selected features from backtest results and counts how often
 each parameter (DPO period, TEMA shift, Savgol window) gets selected.
 
 Shows ALL possible values (used and unused).
+
+Automatically extracts parameter ranges from the actual pipeline code.
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
+import sys
 
 # Backtest results directory
 DATA_DIR = Path(__file__).parent / 'data' / 'backtest_results'
+
+# Add library path to import DPO variants
+LIB_DIR = Path(__file__).parent.parent / 'library'
+sys.path.insert(0, str(LIB_DIR))
+
+
+# ============================================================
+# PARAMETER EXTRACTION FROM ACTUAL PIPELINE CODE
+# ============================================================
+
+def get_dpo_periods() -> list:
+    """Extract DPO periods from dpo_enhanced_variants.py"""
+    try:
+        dpo_file = LIB_DIR / 'dpo_enhanced_variants.py'
+        if dpo_file.exists():
+            with open(dpo_file, 'r') as f:
+                content = f.read()
+            # Look for dpo_periods = list(range(...)) with optional step
+            import re
+            # Match: range(start, end) or range(start, end, step)
+            match = re.search(r'dpo_periods\s*=\s*list\(range\((\d+),\s*(\d+)(?:,\s*(\d+))?\)\)', content)
+            if match:
+                start, end = int(match.group(1)), int(match.group(2))
+                step = int(match.group(3)) if match.group(3) else 1
+                return list(range(start, end, step))
+    except Exception as e:
+        print(f"  [DEBUG] DPO extraction error: {e}")
+
+    return None
+
+
+def get_tema_shifts() -> list:
+    """Extract TEMA shift divisors from dpo_enhanced_variants.py"""
+    try:
+        dpo_file = LIB_DIR / 'dpo_enhanced_variants.py'
+        if dpo_file.exists():
+            with open(dpo_file, 'r') as f:
+                content = f.read()
+            # Look for np.arange(...) in tema_shift_divisors line
+            import re
+            match = re.search(r'for x in np\.arange\(([\d.]+),\s*([\d.]+),\s*([\d.]+)\)', content)
+            if match:
+                start, end, step = float(match.group(1)), float(match.group(2)), float(match.group(3))
+                shifts = [f'{x:.1f}' for x in np.arange(start, end, step)]
+                return shifts
+    except Exception as e:
+        print(f"  [DEBUG] TEMA extraction error: {e}")
+
+    return None
+
+
+def get_savgol_windows() -> list:
+    """Extract Savgol windows from 3_apply_filters.py"""
+    try:
+        filters_file = Path(__file__).parent / '3_apply_filters.py'
+        if filters_file.exists():
+            with open(filters_file, 'r') as f:
+                content = f.read()
+            # Look for savgol_windows = list(range(...))
+            import re
+            match = re.search(r'savgol_windows\s*=\s*list\(range\((\d+),\s*(\d+)\)\)', content)
+            if match:
+                start, end = int(match.group(1)), int(match.group(2))
+                return list(range(start, end))
+    except Exception as e:
+        print(f"  [DEBUG] Savgol extraction error: {e}")
+
+    return None
 
 
 def parse_feature_name(feature_name: str) -> dict:
@@ -118,10 +189,26 @@ def main():
     params_n3 = analyze_parameters(df_n3)
     params_n4 = analyze_parameters(df_n4)
 
-    # Define all possible parameters (fine granularity)
-    dpo_periods = list(range(30, 70))  # 30, 31, 32, ..., 69 (40 total, step 1)
-    tema_shifts = [f'{x:.1f}' for x in np.arange(1.0, 2.1, 0.1)]  # 1.0, 1.1, 1.2, ..., 2.0 (11 total, step 0.1)
-    savgol_windows = list(range(15, 55))  # 15, 16, 17, ..., 54 (40 total, step 1)
+    # Extract parameter ranges from actual pipeline code
+    print("\nExtracting parameter ranges from pipeline code...")
+    dpo_periods = get_dpo_periods()
+    tema_shifts = get_tema_shifts()
+    savgol_windows = get_savgol_windows()
+
+    # Validate extraction
+    if not dpo_periods:
+        print("ERROR: Could not extract DPO periods from code")
+        return 1
+    if not tema_shifts:
+        print("ERROR: Could not extract TEMA shifts from code")
+        return 1
+    if not savgol_windows:
+        print("ERROR: Could not extract Savgol windows from code")
+        return 1
+
+    print(f"  DPO periods: {dpo_periods[0]}d to {dpo_periods[-1]}d ({len(dpo_periods)} total)")
+    print(f"  TEMA shifts: {tema_shifts[0]} to {tema_shifts[-1]} ({len(tema_shifts)} total)")
+    print(f"  Savgol windows: {savgol_windows[0]}d to {savgol_windows[-1]}d ({len(savgol_windows)} total)")
 
     # ========================================================================
     # DPO PERIODS TABLE
