@@ -64,7 +64,7 @@ HOLDING_MONTHS = 1
 
 # N values to test (satellite portfolio size)
 # Test range determines how many top-ranked features to select each month
-N_SATELLITES_TO_TEST = [3, 4, 5]
+N_SATELLITES_TO_TEST = [3, 4]
 
 # Training parameters
 MIN_TRAINING_MONTHS = 36

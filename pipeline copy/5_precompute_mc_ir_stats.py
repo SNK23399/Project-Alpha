@@ -65,7 +65,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_PRECOMPUTE = [3, 4, 5]
+N_SATELLITES_TO_PRECOMPUTE = [3, 4]
 MIN_TRAINING_MONTHS = 36
 # Note: No pre-filtering - all 7,618 features evaluated for true Bayesian learning
 DECAY_HALF_LIFE_MONTHS = 54
@@ -74,7 +74,7 @@ DECAY_HALF_LIFE_MONTHS = 54
 # Instead of fixed samples, run until priors stabilize
 # Since MC is GPU-fast with precomputed data, use tight threshold for true convergence
 MC_BATCH_SIZE = 500_000  # Samples per batch
-MC_CONVERGENCE_THRESHOLD = 0.001  # % max change in prior means (tight - ensures true convergence)
+MC_CONVERGENCE_THRESHOLD = 0.0001  # % max change in prior means (tight - ensures true convergence)
 MC_MIN_SAMPLES = 1_000_000  # Minimum before checking convergence
 MC_MAX_SAMPLES = 3_000_000_000  # Safety limit (generous since MC is fast)
 MC_FALLBACK_SAMPLES = 3_000_000  # If convergence fails, use this
@@ -522,6 +522,9 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
     # Check convergence every batch for detailed progress
     convergence_check_freq = 1
 
+    # Add newline to separate from N values progress bar
+    print()
+
     while total_samples_run < MC_MAX_SAMPLES and not converged:
         # Generate random ensemble sizes (CuPy doesn't support 'out' parameter)
         ensemble_sizes_gpu = cp.random.choice(
@@ -548,25 +551,25 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
         )
         cuda.synchronize()
 
-        # Transfer back
+        # Transfer back (only alphas needed for aggregation)
         alphas_np = cp.asnumpy(out_alphas)
         ensemble_indices_np = cp.asnumpy(ensemble_indices_gpu)
         ensemble_sizes_np = cp.asnumpy(ensemble_sizes_gpu)
 
-        # Aggregate this batch using Numba (fast)
+        # Free batch GPU arrays immediately after transfer (don't wait for garbage collection)
+        del ensemble_sizes_gpu, ensemble_indices_gpu
+
+        # Aggregate this batch using Numba (fast CPU operation)
         aggregate_batch_numba(
             alphas_np, ensemble_indices_np, ensemble_sizes_np,
             candidate_offsets, sample_to_job_batch, all_candidates,
             total_counts, alpha_sums, alpha_sq_sums
         )
 
-        # Free batch GPU arrays immediately (don't wait for garbage collection)
-        del ensemble_sizes_gpu, ensemble_indices_gpu
-
-        # Free GPU memory pool periodically to prevent accumulation
-        # (every 20 batches = every 10M samples with default 500K batch size)
-        # Note: free_all_blocks() is expensive, so we do it less frequently
-        if batch_idx % 20 == 0:
+        # Free GPU memory pool more aggressively to prevent fragmentation and clipping
+        # More frequent cleanup prevents memory fragmentation buildup
+        # (every 5 batches = every 2.5M samples with default 500K batch size)
+        if batch_idx % 5 == 0:
             cp.get_default_memory_pool().free_all_blocks()
 
         total_samples_run += batch_total
@@ -600,9 +603,13 @@ def run_mc_for_n(data, n_satellites, test_start_idx, candidate_mask, inverted_ma
             # Cache the denominator for next iteration (avoids redundant nanmax call)
             prev_prior_means_max = np.nanmax(np.abs(prev_prior_means))
 
-    # Cleanup GPU memory
+    # Cleanup GPU memory - explicitly delete all GPU arrays
     del rankings_gpu, alpha_matrix_gpu, alpha_valid_gpu
     del candidate_indices_gpu, candidate_offsets_gpu, job_train_ends_gpu
+    del ensemble_sizes_choices_gpu, sample_to_job_gpu, out_alphas
+    # Force garbage collection and free all GPU memory blocks
+    import gc
+    gc.collect()
     cp.get_default_memory_pool().free_all_blocks()
 
     # Compute final IR statistics (IR mean and std) - vectorized
@@ -707,14 +714,14 @@ def precompute_all_mc_ir_stats(data):
         if len(valid_ir) > 0:
             stats_summary.append((
                 n_satellites,
-                valid_ir.mean(), valid_ir.min(), valid_ir.max()
+                valid_ir.mean(), valid_ir.min(), valid_ir.max(),
+                last_pct_change
             ))
 
-    # Print summary after progress bar completes
+    # Print summary after all processes complete (sorted by N)
     print("\nIR Statistics per N:")
-    for stats in stats_summary:
-        (n_sat, mean_ir, min_ir, max_ir) = stats
-        print(f"  N={n_sat}: IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}]")
+    for n_sat, mean_ir, min_ir, max_ir, pct_change in sorted(stats_summary):
+        print(f"  N={n_sat}: IR={mean_ir:.4f} [{min_ir:.4f}, {max_ir:.4f}]  (final convergence: {pct_change:.4f}%)")
 
     return mc_ir_means, mc_ir_stds, candidate_masks, inverted_masks, test_start_idx
 

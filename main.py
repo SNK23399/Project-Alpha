@@ -48,10 +48,18 @@ class WalkForwardSatelliteSelectionPipeline:
     Steps 4-6: Precompute feature-IR, MC statistics, and select satellites.
     """
 
-    def __init__(self):
+    def __init__(self, pipeline_dir=None):
         """Initialize pipeline."""
-        self.pipeline_dir = Path(__file__).parent / 'pipeline'
         self.core_satellite_dir = Path(__file__).parent
+        if pipeline_dir is None:
+            self.pipeline_dir = self.core_satellite_dir / 'pipeline'
+        else:
+            # If relative path, make it relative to core_satellite_dir
+            pipeline_path = Path(pipeline_dir)
+            if not pipeline_path.is_absolute():
+                self.pipeline_dir = self.core_satellite_dir / pipeline_path
+            else:
+                self.pipeline_dir = pipeline_path
 
         # Results storage
         self.results = {
@@ -478,6 +486,13 @@ Examples:
         help='Run only this step (e.g., "7"). Shorthand for --steps'
     )
 
+    parser.add_argument(
+        '--pipeline-dir',
+        type=str,
+        default=None,
+        help='Path to pipeline directory (default: ./pipeline, can use ./pipeline_copy for testing)'
+    )
+
     args = parser.parse_args()
 
     # Handle step selection
@@ -489,7 +504,7 @@ Examples:
         steps_to_run = [s.strip() for s in args.steps.split(',')]
 
     # Create and run pipeline
-    pipeline = WalkForwardSatelliteSelectionPipeline()
+    pipeline = WalkForwardSatelliteSelectionPipeline(pipeline_dir=args.pipeline_dir)
 
     results = pipeline.run(steps=steps_to_run)
 

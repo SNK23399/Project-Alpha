@@ -285,14 +285,14 @@ def main():
     print(f"\nFound {len(base_signal_names)} base signals")
 
     # Savgol parameters (windows ONLY - polyorder_2 is LOCKED as optimal)
-    savgol_windows = list(range(15, 60, 3))  # 15, 18, 21, ..., 57 (15 sizes)
+    savgol_windows = list(range(15, 57, 3))  # 15, 18, 21, ..., 54 (14 sizes)
     savgol_polyorders = [2]  # polyorder_2 ONLY (empirically 83-87% selection rate)
     n_savgol_variants = len(savgol_windows) * len(savgol_polyorders)
 
     # Only use Savitzky-Golay filter (ensemble-validated best performer)
     filter_names = ['savgol']
     print(f"Filter: Savitzky-Golay (ensemble-validated best performer)")
-    print(f"  Windows: {savgol_windows} (15 sizes, step 3)")
+    print(f"  Windows: {savgol_windows} (14 sizes, step 3)")
     print(f"  Polynomial order: {savgol_polyorders[0]} ONLY (optimized - polyorder_2 locked as best)")
 
     # Backup existing filtered signals before recomputation
@@ -394,7 +394,7 @@ def main():
 
     # Apply Savgol filter to each base signal with different window/polyorder combinations
     from tqdm import tqdm
-    for base_signal_name in tqdm(sorted(signal_bases.keys()), desc="Base signals"):
+    for base_signal_name in tqdm(sorted(signal_bases.keys()), desc="Base signals", ncols=120):
         base_array = signal_bases[base_signal_name]
 
         # Apply each Savgol variant
