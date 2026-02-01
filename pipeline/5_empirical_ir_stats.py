@@ -54,7 +54,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_ANALYZE = [1, 2, 3, 4, 5]
+N_SATELLITES_TO_ANALYZE = [3, 4, 5]
 MIN_TRAINING_MONTHS = 12  # Require at least this much history
 
 # Output directory

@@ -189,9 +189,13 @@ def get_savgol_windows() -> list:
 def parse_feature_name(feature_name: str) -> dict:
     """Parse feature name into components.
 
-    New DPO format (Savgol-based):
-    Example: dpo_21d__savgol__polyorder_3__shift_1_0
-    Returns: {'dpo_period': 21, 'polyorder': 3, 'shift': '1.0'}
+    New DPO format with post-processing (Savgol-based):
+    Example: dpo_21d__savgol__polyorder_4__shift_1_0__savgol_6d_polyorder_4
+    Returns: {'dpo_period': 21, 'polyorder': 4, 'shift': '1.0', 'savgol_window': 6}
+
+    New DPO format without post-processing (base signal):
+    Example: dpo_21d__savgol__polyorder_4__shift_1_0
+    Returns: {'dpo_period': 21, 'polyorder': 4, 'shift': '1.0'}
 
     Old DPO format (TEMA-based, for backward compatibility):
     Example: dpo_30d__tema__shift_1_0__savgol_15d_polyorder_2
@@ -209,9 +213,9 @@ def parse_feature_name(feature_name: str) -> dict:
         except:
             pass
 
-    # Check for new Savgol-based DPO format: dpo_Xd__savgol__polyorder_Y__shift_Z_Z
+    # Check for new Savgol-based DPO format: dpo_Xd__savgol__polyorder_Y__shift_Z_Z[__savgol_Wd_polyorder_P]
     if len(parts) >= 4 and parts[1] == 'savgol':
-        # Extract polyorder (e.g., "polyorder_3" -> 3)
+        # Extract polyorder from DPO (e.g., "polyorder_4" -> 4)
         if parts[2].startswith('polyorder_'):
             polyorder_str = parts[2].replace('polyorder_', '')
             try:
@@ -224,6 +228,23 @@ def parse_feature_name(feature_name: str) -> dict:
             shift_str = parts[3].replace('shift_', '')  # "1_0" or "2_0"
             shift_decimal = shift_str.replace('_', '.')  # "1.0" or "2.0"
             result['shift'] = shift_decimal
+
+        # Check for post-processing Savgol filter (e.g., "savgol_6d_polyorder_4")
+        if len(parts) >= 5 and parts[4].startswith('savgol_'):
+            savgol_part = parts[4].replace('savgol_', '')  # "6d_polyorder_4"
+            window_str = savgol_part.split('d_')[0]  # "6"
+            try:
+                result['savgol_window'] = int(window_str)
+            except:
+                pass
+
+            # Extract post-processing polyorder if different from DPO polyorder
+            if 'polyorder_' in savgol_part:
+                polyorder_str = savgol_part.split('polyorder_')[1]  # "4"
+                try:
+                    result['savgol_polyorder'] = int(polyorder_str)
+                except:
+                    pass
 
     # Check for old TEMA-based DPO format (backward compatibility)
     elif len(parts) >= 3 and parts[1] == 'tema' and parts[2].startswith('shift_'):
@@ -458,23 +479,23 @@ def main():
     # TEMA SHIFTS TABLE
     # ========================================================================
     print("\n" + "=" * 120)
-    print("TEMA SHIFTS (divisors, range order, step 0.1)")
+    print("DPO SHIFTS (divisors)")
     print("=" * 120)
 
     # Build dynamic header
-    tema_header = f"{'Shift':>10}"
+    shift_header = f"{'Shift':>10}"
     for n in n_values:
-        tema_header += f" {'N=' + str(n):>8}"
-    tema_header += f" {'Total':>8}"
-    print(tema_header)
+        shift_header += f" {'N=' + str(n):>8}"
+    shift_header += f" {'Total':>8}"
+    print(shift_header)
     print("-" * 120)
 
-    for shift_str in tema_shifts:
+    for shift_str in dpo_shifts:
         shift_val = float(shift_str)
         row = f"{shift_str:>10}"
         counts = []
         for n in n_values:
-            count = int(params_by_n[n]['tema'].get(shift_val, 0))
+            count = int(params_by_n[n]['shift'].get(shift_val, 0))
             row += f" {count:>8}"
             counts.append(count)
         total = sum(counts)
@@ -483,8 +504,17 @@ def main():
 
     # Summary
     print("-" * 120)
-    used_count = sum(1 for s_str in tema_shifts if sum(int(params_by_n[n]['tema'].get(float(s_str), 0)) for n in n_values) > 0)
-    print(f"{'SUMMARY':>10} - Used: {used_count}/{len(tema_shifts)}, Unused: {len(tema_shifts) - used_count}/{len(tema_shifts)}")
+    used_count = sum(1 for s_str in dpo_shifts if sum(int(params_by_n[n]['shift'].get(float(s_str), 0)) for n in n_values) > 0)
+    print(f"{'SUMMARY':>10} - Used: {used_count}/{len(dpo_shifts)}, Unused: {len(dpo_shifts) - used_count}/{len(dpo_shifts)}")
+
+    # ========================================================================
+    # DPO POLYORDER
+    # ========================================================================
+    print("\n" + "=" * 120)
+    print(f"DPO POLYORDER (Savgol polynomial degree)")
+    print("=" * 120)
+    print(f"Polyorder: {dpo_polyorder} (quartic - heavy smoothing)")
+    print(f"All {len(dpo_periods)} × {len(dpo_shifts)} = {len(dpo_periods) * len(dpo_shifts)} DPO variants use polyorder {dpo_polyorder}")
 
     # ========================================================================
     # SAVGOL WINDOWS TABLE (with split range detection)

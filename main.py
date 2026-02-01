@@ -2,34 +2,25 @@
 Core-Satellite Portfolio Pipeline - Main Orchestrator
 =====================================================
 
-Runs complete pipeline for satellite selection + adaptive allocation weighting.
+Runs complete pipeline for signal generation and strategy evaluation.
 
 Workflow:
   1. Compute forward alpha and information ratio (target variable)
-  2. Compute all signal bases (with automatic backup)
-  3. Apply all filters (with automatic backup)
+  2. Compute DPO base signal variants
+  3. Apply Savgol post-processing filter to signals
   4. Precompute feature-IR matrix (signal predictions)
-  5. Precompute MC Information Ratio statistics (Bayesian priors)
-  6. Run Bayesian satellite selection (select satellites for the month)
-  7. Generate monthly portfolio allocation (buy orders for 60/40 split)
-  8. [Future: Discover allocation hyperparameters]
-  9. [Future: Discover allocation weights via MC]
+  5. Compute empirical IR statistics
+  6. Evaluate deterministic strategies with IR metrics
 
 Usage:
   python main.py                           # All steps (1,2,3,4,5,6)
   python main.py --steps 1,2,3,4,5,6       # Run specific steps (comma-separated)
   python main.py --only-step 6             # Run only one step
-  python main.py --only-step 7             # Run only allocation generation
 
 Examples:
-  python main.py                           # Run full pipeline (signals + selection)
-  python main.py --steps 4,5,6             # Skip to satellite selection
-  python main.py --only-step 6             # Only select satellites
-  python main.py --only-step 7             # Generate monthly allocation (interactive)
-
-Output:
-  Stage 6: data/backtest_results/bayesian_backtest_N*.csv    - Satellite selections
-  Stage 7: data/allocation/allocation_YYYYMMDD_HHMMSS.csv    - Buy orders for portfolio
+  python main.py                           # Run full pipeline
+  python main.py --steps 4,5,6             # Skip to feature-IR computation
+  python main.py --only-step 6             # Only run strategy evaluation
 """
 
 import sys
@@ -42,10 +33,10 @@ import importlib.util
 
 class WalkForwardSatelliteSelectionPipeline:
     """
-    Orchestrates complete walk-forward satellite selection pipeline.
+    Orchestrates complete pipeline for signal generation and strategy evaluation.
 
-    Steps 1-3: Compute forward alpha, signal bases, and filters.
-    Steps 4-6: Precompute feature-IR, MC statistics, and select satellites.
+    Steps 1-3: Compute target variable (forward IR), DPO signals, and post-processing filter.
+    Steps 4-6: Precompute feature-IR matrix, compute IR statistics, and evaluate strategies.
     """
 
     def __init__(self, pipeline_dir=None):
@@ -139,15 +130,15 @@ class WalkForwardSatelliteSelectionPipeline:
 
     def step_2_compute_signal_bases(self) -> dict:
         """
-        Step 2: Compute all signal bases
+        Step 2: Compute DPO base signal variants
 
-        Calls 2_compute_signal_bases.py to compute all 293 signal bases.
+        Calls 2_compute_signal_bases.py to compute Savgol-based DPO variants.
         Includes inline correlation filtering and ranking matrix computation.
 
         Returns:
             Dictionary with computation stats
         """
-        self.print_header("Compute All Signal Bases", "2")
+        self.print_header("Compute DPO Base Signal Variants", "2")
 
         try:
             script_path = self.pipeline_dir / '2_compute_signal_bases.py'
@@ -156,10 +147,7 @@ class WalkForwardSatelliteSelectionPipeline:
             sys.modules['compute_signal_bases_module'] = module
             spec.loader.exec_module(module)
 
-            print(f"\n  Computing 293 signal bases from all ETF prices...")
-            print(f"  - Momentum, volatility, technical indicators, etc.")
-            print(f"  - Includes inline correlation filtering (|r| > 0.1)")
-            print(f"  - Backup: Enabled - will save to backup/1_compute_signal_bases/YYYY_MM_DD/")
+            print(f"\n  Computing DPO base signal variants...")
 
             stats = module.compute_and_save_signal_bases()
 
@@ -181,13 +169,13 @@ class WalkForwardSatelliteSelectionPipeline:
 
     def step_3_apply_filters(self) -> dict:
         """
-        Step 3: Apply all filters to signal bases
+        Step 3: Apply Savgol post-processing filter to DPO base signals
 
-        Applies 25 smoothing filters (EMA, Hull MA, etc.) to all signal bases,
-        creating 7,325 filtered signals.
+        Applies post-processing Savgol filter to DPO base signals,
+        creating a signal library for satellite selection.
         Includes inline correlation filtering and ranking matrix computation.
         """
-        self.print_header("Apply All Filters", "3")
+        self.print_header("Apply Savgol Post-Processing Filter", "3")
 
         try:
             script_path = self.pipeline_dir / '3_apply_filters.py'
@@ -200,11 +188,7 @@ class WalkForwardSatelliteSelectionPipeline:
             sys.modules['apply_filters_module'] = module
             spec.loader.exec_module(module)
 
-            print(f"\n  Applying 25 filters to {self.results['steps'].get('1_compute_signal_bases', {}).get('n_signals', 293)} signal bases...")
-            print(f"  - Exponential Moving Average (EMA), Hull Moving Average, etc.")
-            print(f"  - Generates ~7,325 filtered signals")
-            print(f"  - Includes inline correlation filtering (|r| > 0.1)")
-            print(f"  - Backup: Enabled - will save to backup/2_apply_filters/YYYY_MM_DD/")
+            print(f"\n  Applying Savgol post-processing filter...")
 
             original_argv = sys.argv
             try:
@@ -216,7 +200,7 @@ class WalkForwardSatelliteSelectionPipeline:
             if result != 0:
                 raise RuntimeError(f"Filter application failed with code {result}")
 
-            self.print_progress("All filters applied successfully")
+            self.print_progress("Post-processing filter applied successfully")
 
             return {'status': 'completed'}
 
@@ -225,7 +209,7 @@ class WalkForwardSatelliteSelectionPipeline:
             raise
 
     # ========================================================================
-    # STEP 5: Precompute Feature-IR Matrix
+    # STEP 4: Precompute Feature-IR Matrix
     # ========================================================================
 
     def step_4_precompute_feature_ir(self) -> dict:
@@ -244,10 +228,7 @@ class WalkForwardSatelliteSelectionPipeline:
             if not script_path.exists():
                 raise FileNotFoundError(f"Script not found: {script_path}")
 
-            print(f"\n  Precomputing feature-IR statistics...")
-            print(f"  - For each filtered signal: mean IR of top-N ETFs")
-            print(f"  - Uses rankings from Step 3 and forward IR from Step 1")
-            print(f"  - Answers: Which signals reliably predict good IR?")
+            print(f"\n  Precomputing feature-IR matrix...")
 
             result = subprocess.run(
                 [sys.executable, str(script_path)],
@@ -273,23 +254,17 @@ class WalkForwardSatelliteSelectionPipeline:
 
     def step_5_precompute_mc_ir_stats(self) -> dict:
         """
-        Step 5: Precompute MC Information Ratio Statistics
+        Step 5: Compute Empirical Information Ratio Statistics
 
-        Runs Monte Carlo simulations to compute IR distribution statistics
-        for each (feature, N_satellites) combination. These become Bayesian priors.
+        Computes empirical IR statistics for signal evaluation.
         """
-        self.print_header("Precompute MC Information Ratio Statistics", "5")
+        self.print_header("Compute Empirical IR Statistics", "5")
 
         try:
-            script_path = self.pipeline_dir / '5_precompute_mc_ir_stats.py'
+            script_path = self.pipeline_dir / '5_empirical_ir_stats.py'
 
             if not script_path.exists():
                 raise FileNotFoundError(f"Script not found: {script_path}")
-
-            print(f"\n  Computing Monte Carlo IR statistics...")
-            print(f"  - Simulates 1M samples per month per feature")
-            print(f"  - Generates Bayesian priors for satellite selection")
-            print(f"  - Uses rankings from Step 3 and forward IR from Step 1")
 
             result = subprocess.run(
                 [sys.executable, str(script_path)],
@@ -299,9 +274,46 @@ class WalkForwardSatelliteSelectionPipeline:
             )
 
             if result.returncode != 0:
-                raise RuntimeError(f"MC IR computation failed with code {result.returncode}")
+                raise RuntimeError(f"Empirical IR computation failed with code {result.returncode}")
 
-            self.print_progress("MC IR statistics computed successfully")
+            self.print_progress("Empirical IR statistics computed successfully")
+
+            return {'status': 'completed'}
+
+        except Exception as e:
+            print(f"\n  [ERROR] in step 5: {str(e)}")
+            raise
+
+    # ========================================================================
+    # STEP 6: Deterministic Strategy IR Evaluation
+    # ========================================================================
+
+    def step_6_bayesian_strategy(self) -> dict:
+        """
+        Step 6: Deterministic Strategy with Information Ratio Evaluation
+
+        Evaluates deterministic strategies using information ratio metrics.
+        Runs walk-forward backtest with strategy evaluation.
+        """
+        self.print_header("Deterministic Strategy IR Evaluation", "6")
+
+        try:
+            script_path = self.pipeline_dir / '6_deterministic_strategy_ir.py'
+
+            if not script_path.exists():
+                raise FileNotFoundError(f"Script not found: {script_path}")
+
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(self.pipeline_dir),
+                capture_output=False,
+                check=False
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Strategy evaluation failed with code {result.returncode}")
+
+            self.print_progress("Strategy evaluation completed")
 
             return {'status': 'completed'}
 
@@ -309,108 +321,19 @@ class WalkForwardSatelliteSelectionPipeline:
             print(f"\n  [ERROR] in step 6: {str(e)}")
             raise
 
-    # ========================================================================
-    # STEP 7: Bayesian Satellite Selection
-    # ========================================================================
-
-    def step_6_bayesian_strategy(self) -> dict:
-        """
-        Step 6: Bayesian Satellite Selection with Walk-Forward Backtesting
-
-        Uses pre-computed feature-IR and MC statistics to select satellites
-        using Bayesian learning with 2 hyperparameters (decay rate, prior strength).
-        Runs complete walk-forward backtest.
-        """
-        self.print_header("Bayesian Satellite Selection & Backtest", "6")
-
-        try:
-            script_path = self.pipeline_dir / '6_bayesian_strategy_ir.py'
-
-            if not script_path.exists():
-                raise FileNotFoundError(f"Script not found: {script_path}")
-
-            print(f"\n  Running Bayesian satellite selection...")
-            print(f"  - Uses learned hyperparameters (decay, prior strength)")
-            print(f"  - Performs walk-forward backtest")
-            print(f"  - Outputs satellite selections and performance metrics")
-
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                cwd=str(self.pipeline_dir),
-                capture_output=False,
-                check=False
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(f"Bayesian selection failed with code {result.returncode}")
-
-            self.print_progress("Bayesian satellite selection completed")
-
-            return {'status': 'completed'}
-
-        except Exception as e:
-            print(f"\n  [ERROR] in step 7: {str(e)}")
-            raise
-
-    # ========================================================================
-    # STEP 7: Generate Monthly Portfolio Allocation
-    # ========================================================================
-
-    def step_7_generate_monthly_allocation(self) -> dict:
-        """
-        Step 7: Generate Monthly Portfolio Allocation
-
-        Takes user budget and generates actionable buy orders based on
-        the latest satellite selections from Stage 6.
-
-        Creates a 60/40 core-satellite portfolio with integer quantities
-        and minimal uninvested cash.
-        """
-        self.print_header("Generate Monthly Portfolio Allocation", "9")
-
-        try:
-            script_path = self.pipeline_dir / '7_generate_monthly_allocation.py'
-
-            if not script_path.exists():
-                raise FileNotFoundError(f"Script not found: {script_path}")
-
-            print(f"\n  Generating portfolio allocation...")
-            print(f"  - Reads latest satellite selections from Stage 6")
-            print(f"  - Calculates optimal buy orders for 60/40 split")
-            print(f"  - Minimizes uninvested cash")
-            print(f"  - Output: CSV with buy orders (ISIN, quantity, price, total)")
-
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                cwd=str(self.pipeline_dir),
-                capture_output=False,
-                check=False
-            )
-
-            if result.returncode != 0:
-                raise RuntimeError(f"Allocation generation failed with code {result.returncode}")
-
-            self.print_progress("Monthly allocation generated successfully")
-
-            return {'status': 'completed'}
-
-        except Exception as e:
-            print(f"\n  [ERROR] in step 9: {str(e)}")
-            raise
 
     def run(self, steps: list = None) -> dict:
         """
         Execute the pipeline (selected steps or all steps).
 
         Args:
-            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6', '7']).
+            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6']).
                    If None, execute all steps in order: ['1', '2', '3', '4', '5', '6']
-                   Step 7 (allocation) is optional and runs interactively when specified.
 
         Returns:
             Dictionary with all results
         """
-        # Default to steps 1-6 if none specified (allocation requires user input)
+        # Default to steps 1-6 if none specified
         if steps is None:
             steps = ['1', '2', '3', '4', '5', '6']
 
@@ -422,7 +345,6 @@ class WalkForwardSatelliteSelectionPipeline:
             '4': self.step_4_precompute_feature_ir,
             '5': self.step_5_precompute_mc_ir_stats,
             '6': self.step_6_bayesian_strategy,
-            '7': self.step_7_generate_monthly_allocation,
         }
 
         # Validate requested steps
@@ -459,16 +381,14 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='Walk-Forward Satellite Selection Pipeline',
+        description='Core-Satellite Portfolio Pipeline',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                           # All steps (1,2,3,4,5,6) - full pipeline
+  python main.py                           # All steps (1,2,3,4,5,6)
   python main.py --steps 2,3               # Only steps 2 & 3
-  python main.py --steps 4,5,6             # Feature-IR through backtest
-  python main.py --only-step 6             # Only step 6 (satellite selection)
-  python main.py --only-step 7             # Only step 7 (generate allocation - interactive)
-  python main.py --steps 1,2,3,4,5,6,7     # Full pipeline + allocation
+  python main.py --steps 4,5,6             # Feature-IR through strategy evaluation
+  python main.py --only-step 6             # Only step 6 (strategy evaluation)
         """
     )
 

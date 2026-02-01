@@ -65,15 +65,15 @@ HOLDING_MONTHS = 1
 
 # N values to test (satellite portfolio size)
 # Test range determines how many top-ranked features to select each month
-N_SATELLITES_TO_TEST = [1, 2, 3, 4, 5]
+N_SATELLITES_TO_TEST = [3, 4, 5]
 
 # Training parameters
 MIN_TRAINING_MONTHS = 12  # Warm-up period for empirical prior estimation
 REOPTIMIZATION_FREQUENCY = 1
 
 # Feature selection parameters
-MIN_ENSEMBLE_SIZE = 25  # Minimum features for stability
-MAX_ENSEMBLE_SIZE = 25
+MIN_ENSEMBLE_SIZE = 52  # Minimum features for stability
+MAX_ENSEMBLE_SIZE = 52
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
 DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD = 0.001

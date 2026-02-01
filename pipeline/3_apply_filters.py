@@ -285,7 +285,7 @@ def main():
     print(f"\nFound {len(base_signal_names)} base signals")
 
     # Savgol parameters
-    savgol_windows = list(range(6, 37, 1))
+    savgol_windows = list(range(6, 36, 1))
     savgol_polyorders = [4]  # Polyorder: 4 (quartic - heavy smoothing)
     n_savgol_variants = len(savgol_windows) * len(savgol_polyorders)
 
