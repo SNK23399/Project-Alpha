@@ -284,16 +284,16 @@ def main():
 
     print(f"\nFound {len(base_signal_names)} base signals")
 
-    # Savgol parameters (windows ONLY - polyorder_2 is LOCKED as optimal)
-    savgol_windows = list(range(50, 71))  # 50, 51, 52, ..., 70 (21 sizes, step 1)
-    savgol_polyorders = [2]  # polyorder_2 ONLY (empirically 83-87% selection rate)
+    # Savgol parameters (polyorder 2 is locked as optimal)
+    savgol_windows = list(range(2, 33, 1))
+    savgol_polyorders = [2]  # Polyorder: empirically optimal based on ensemble validation
     n_savgol_variants = len(savgol_windows) * len(savgol_polyorders)
 
     # Only use Savitzky-Golay filter (ensemble-validated best performer)
     filter_names = ['savgol']
-    print(f"Filter: Savitzky-Golay (ensemble-validated best performer)")
-    print(f"  Windows: 50d to 70d (21 sizes, step 1)")
-    print(f"  Polynomial order: {savgol_polyorders[0]} ONLY (optimized - polyorder_2 locked as best)")
+    print(f"Filter: Savitzky-Golay (ensemble-validated)")
+    print(f"  Windows: {savgol_windows[0]}d to {savgol_windows[-1]}d (step {savgol_windows[1] - savgol_windows[0]})")
+    print(f"  Polyorder: {savgol_polyorders[0]}")
 
     # Backup existing filtered signals before recomputation
     print("\nBacking up and clearing existing filtered signals...")

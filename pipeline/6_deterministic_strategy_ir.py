@@ -33,7 +33,8 @@ Usage:
     python 6_deterministic_strategy_ir.py
 
 Output:
-    data/backtest_results/deterministic_backtest_ir_summary.csv
+    data/backtest_results/deterministic_backtest_ir_*N*.csv
+    Where N is the ensemble size (e.g., N3, N4)
 """
 
 import sys
@@ -64,15 +65,15 @@ HOLDING_MONTHS = 1
 
 # N values to test (satellite portfolio size)
 # Test range determines how many top-ranked features to select each month
-N_SATELLITES_TO_TEST = [3, 4]
+N_SATELLITES_TO_TEST = [1, 2, 3, 4, 5]
 
 # Training parameters
-MIN_TRAINING_MONTHS = 12  # 12 months warm-up for empirical prior estimation
+MIN_TRAINING_MONTHS = 12  # Warm-up period for empirical prior estimation
 REOPTIMIZATION_FREQUENCY = 1
 
 # Feature selection parameters
-MIN_ENSEMBLE_SIZE = 8  # Force at least 3 features for stability
-MAX_ENSEMBLE_SIZE = 10
+MIN_ENSEMBLE_SIZE = 100  # Minimum features for stability
+MAX_ENSEMBLE_SIZE = 100
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
 DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD = 0.001
@@ -340,22 +341,24 @@ def load_data():
 
     if empirical_file.exists():
         empirical_data = np.load(empirical_file, allow_pickle=True)
+
+        # Extract available N values from empirical data
+        available_n = [int(k.replace('ir_mean_N', '')) for k in empirical_data.keys() if k.startswith('ir_mean_N')]
+        available_n.sort()
+
         # Adapt empirical data to match MC data structure
         mc_data = {
             'mc_ir_mean': [
                 empirical_data.get(f'ir_mean_N{n}', None)
-                for n in [3, 4, 5, 6, 7, 8, 9, 10]
+                for n in available_n
             ],
             'mc_ir_std': [
                 empirical_data.get(f'ir_std_N{n}', None)
-                for n in [3, 4, 5, 6, 7, 8, 9, 10]
+                for n in available_n
             ],
-            'n_satellites': [3, 4, 5, 6, 7, 8, 9, 10],
-            'candidate_masks': [np.ones((empirical_data[f'ir_mean_N{n}'].shape[0], empirical_data[f'ir_mean_N{n}'].shape[1]), dtype=bool) for n in [3, 4, 5, 6, 7, 8, 9, 10] if f'ir_mean_N{n}' in empirical_data]
+            'n_satellites': available_n,
+            'candidate_masks': [np.ones((empirical_data[f'ir_mean_N{n}'].shape[0], empirical_data[f'ir_mean_N{n}'].shape[1]), dtype=bool) for n in available_n if f'ir_mean_N{n}' in empirical_data]
         }
-        # Filter to only available N values
-        available_n = [int(k.replace('ir_mean_N', '')) for k in empirical_data.keys() if k.startswith('ir_mean_N')]
-        available_n.sort()
         mc_data['n_satellites'] = available_n
         mc_data['mc_ir_mean'] = [empirical_data[f'ir_mean_N{n}'] for n in available_n]
         mc_data['mc_ir_std'] = [empirical_data[f'ir_std_N{n}'] for n in available_n]

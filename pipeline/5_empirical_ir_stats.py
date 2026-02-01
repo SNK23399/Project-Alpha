@@ -29,7 +29,7 @@ Output:
         hit_rate: (n_test_dates, n_signals) - % positive
         dates: test dates
         features: signal names
-        n_satellites: [3, 4] ensemble sizes
+        n_satellites: ensemble sizes to analyze
 
 Usage:
     python 5_empirical_ir_stats.py
@@ -54,7 +54,7 @@ sys.path.insert(0, str(project_root))
 # ============================================================
 
 HOLDING_MONTHS = 1
-N_SATELLITES_TO_ANALYZE = [3, 4]
+N_SATELLITES_TO_ANALYZE = [1, 2, 3, 4, 5]
 MIN_TRAINING_MONTHS = 12  # Require at least this much history
 
 # Output directory

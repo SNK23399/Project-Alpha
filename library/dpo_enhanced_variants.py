@@ -17,13 +17,12 @@ TEMA - THE CHAMPION:
 - Optimal balance of responsiveness and smoothness
 - 98-100% selection rate in ensemble backtests
 
-TEMA SHIFT DIVISORS (11 variants - broad exploratory range):
-Explores optimal lag-shift alignment with full spectrum (1.0 to 3.0):
-- shift = period / 1.0, 1.2, 1.4, 1.6, 1.8, 2.0, 2.2, 2.4, 2.6, 2.8, 3.0 (11 shifts, step 0.2)
-- Example: 60d period → shifts: 60, 50, 43, 37, 33, 30, 27, 25, 23, 21, 20
+TEMA SHIFT DIVISORS:
+Explores optimal lag-shift alignment with full spectrum (responsive to conservative)
+- Example: 60d period → shifts range from 60 (1.0 divisor) to 20 (3.0 divisor)
 
-Windows: 10d through 100d (46 periods with 2-day granularity)
-Total: 46 periods × 11 TEMA shift divisors = 506 variants
+Window selection strategy: Broad range with step spacing to explore momentum cycles
+at multiple timeframes (2-week minimum through 6-month maximum)
 
 OPTIMIZATION: Uses GPU-accelerated TEMA implementation from signal_filters
 - TEMA: GPU-accelerated with scipy.signal optimizations
@@ -54,16 +53,10 @@ def compute_dpo_variants_generator(
     """
     Generator that yields TEMA-only DPO variants with broad exploratory scope.
 
-    For each DPO period (10d through 100d with 2-day step), computes TEMA with 11 shift divisors:
+    For each DPO period (21d, 42d, 63d), computes TEMA with 1 shift divisor.
 
-    TEMA Shift Divisors (11 variants spanning responsive to conservative):
-    - tema__shift_1_0  (shift = period / 1.0: 60d → 60) - most responsive
-    - tema__shift_1_2  (shift = period / 1.2: 60d → 50)
-    - tema__shift_1_4  (shift = period / 1.4: 60d → 43)
-    - ... [continues with 0.2 increments] ...
-    - tema__shift_3_0  (shift = period / 3.0: 60d → 20) - most conservative
-
-    Total: 46 periods × 11 TEMA shifts = 506 variants
+    TEMA Shift Divisor:
+    - tema__shift_2_0 (conservative): shift = period / 2.0
 
     Yields:
         (signal_name, signal_2d_array)
@@ -78,21 +71,15 @@ def compute_dpo_variants_generator(
     prices_arr = etf_prices.values
     core_prices_arr = core_prices.values
 
-    # DPO windows: 10d to 100d range with step of 2 days (46 periods)
-    # Broad exploratory range for momentum cycle discovery
-    # 10d:  ~2 weeks - lower bound (very short-term)
-    # 100d: ~5 months - upper bound (longer-term)
-    # 10-100d range with step 2 (46 periods) - comprehensive exploration
-    dpo_periods = list(range(10, 101, 2))  # 10, 12, 14, ..., 100 (46 periods)
+    # DPO windows: specific periods for multi-scale momentum analysis
+    dpo_periods = [21, 42, 63]
 
     # TEMA shift divisors to optimize lag-alignment
     # TEMA's lower lag (period/4-5) vs standard shift (period/2+1) creates misalignment
-    # Multiple shifts let ensemble find optimal lag-alignment for each window
-    # Broad range: 1.0 to 3.0 (responsive to conservative)
-    # Step 0.2 increments (11 shifts total: 1.0, 1.2, 1.4, ..., 3.0)
+    # Conservative shift: period / 2.0
     tema_shift_divisors = {
         f'tema__shift_{x:.1f}'.replace('.', '_'): lambda p, div=x: max(1, int(p / div))
-        for x in np.arange(1.0, 3.1, 0.2)
+        for x in [2.0]
     }
 
     for dpo_period in dpo_periods:
@@ -119,14 +106,17 @@ def compute_dpo_variants_generator(
 
 def count_dpo_variants() -> int:
     """Count total DPO variants that will be generated."""
-    dpo_periods = list(range(10, 101, 2))  # 10 to 100 inclusive, step 2 (46 periods)
-    tema_shifts = len(list(np.arange(1.0, 3.1, 0.2)))  # 1.0 to 3.0 step 0.2 (11 shifts)
+    dpo_periods = [21, 42, 63]
+    tema_shifts = 1  # Only shift 2.0
     return len(dpo_periods) * tema_shifts
 
 
 if __name__ == "__main__":
-    print(f"DPO Enhanced Variants Library - Broad Exploratory Space")
-    print(f"Total variants: {count_dpo_variants()}")
-    print(f"  Periods: 10d to 100d in steps of 2 days (46 total)")
-    print(f"  TEMA shift divisors: 1.0 to 3.0 in steps of 0.2 (11 total)")
-    print(f"  Total: {count_dpo_variants()} variants (46 × 11)")
+    dpo_periods = [21, 42, 63]
+    tema_shifts = [2.0]
+    total = len(dpo_periods) * len(tema_shifts)
+
+    print(f"DPO Enhanced Variants Library")
+    print(f"Total variants: {total}")
+    print(f"  Periods: {dpo_periods}")
+    print(f"  TEMA shift divisor: {tema_shifts[0]:.1f}")

@@ -8,17 +8,9 @@ This script:
 3. Saves DPO signals to parquet files (each signal saved immediately)
 
 Features:
-- TEMA-ONLY: Computes 287 DPO variants (41 windows × 7 variants)
-  - Windows: 30d through 70d (steps of 1 = 41 windows)
-  - 7 TEMA shift divisors: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
-- TEMA SHIFT DIVISORS: Explores optimal lag-shift alignment for TEMA
-  - shift_1_1 (period / 1.1): Smallest shift
-  - shift_1_2 (period / 1.2):
-  - shift_1_3 (period / 1.3):
-  - shift_1_4 (period / 1.4):
-  - shift_1_5 (period / 1.5): Previously "conservative"
-  - shift_1_6 (period / 1.6):
-  - shift_1_7 (period / 1.7): Largest shift
+- TEMA-ONLY: Computes DPO variants from library.dpo_enhanced_variants
+  - Explores multiple window periods with TEMA shift divisors
+  - Multiple lag-shift alignments for optimal parameter discovery
 - FULL recomputation: Always recomputes from scratch to ensure fresh data
 - Price corrections captured: Any database updates are reflected
 - Fresh rolling windows: All calculations use current data
@@ -223,8 +215,8 @@ def compute_and_save_signal_bases(
     # Load price data
     print("\nLoading price data...")
 
-    # Need extra lookback for rolling calculations
-    # 400 days ensures full warmup for: 252-day signals + 63-day filters + margin
+    # Need extra lookback for rolling calculations (warmup period for signal computation)
+    # Extra lookback window to ensure signals have enough history
     lookback_start = (pd.Timestamp(start_date) - timedelta(days=400)).strftime('%Y-%m-%d')
 
     etf_prices = etf_db.load_all_prices(isins=isins, start_date=lookback_start, end_date=end_date)

@@ -29,20 +29,43 @@ sys.path.insert(0, str(LIB_DIR))
 # ============================================================
 
 def get_dpo_periods() -> list:
-    """Extract DPO periods from dpo_enhanced_variants.py"""
+    """Extract DPO periods from dpo_enhanced_variants.py (handles split ranges and hardcoded lists)"""
     try:
         dpo_file = LIB_DIR / 'dpo_enhanced_variants.py'
         if dpo_file.exists():
             with open(dpo_file, 'r') as f:
                 content = f.read()
-            # Look for dpo_periods = list(range(...)) with optional step
             import re
-            # Match: range(start, end) or range(start, end, step)
-            match = re.search(r'dpo_periods\s*=\s*list\(range\((\d+),\s*(\d+)(?:,\s*(\d+))?\)\)', content)
-            if match:
-                start, end = int(match.group(1)), int(match.group(2))
-                step = int(match.group(3)) if match.group(3) else 1
-                return list(range(start, end, step))
+
+            # First try to match split ranges with + operator (range objects)
+            matches = re.findall(r'list\(range\((\d+),\s*(\d+)(?:,\s*(\d+))?\)\)', content)
+
+            if matches:
+                periods = []
+                for match in matches:
+                    start, end = int(match[0]), int(match[1])
+                    step = int(match[2]) if match[2] else 1
+                    periods.extend(list(range(start, end, step)))
+
+                # Remove duplicates while preserving order
+                seen = set()
+                result = []
+                for p in periods:
+                    if p not in seen:
+                        result.append(p)
+                        seen.add(p)
+
+                return sorted(result)
+
+            # If no ranges found, try to match hardcoded list like [31, 62]
+            list_match = re.search(r'dpo_periods\s*=\s*\[([^\]]+)\]', content)
+            if list_match:
+                list_content = list_match.group(1)
+                # Extract all numbers from the list
+                numbers = re.findall(r'\d+', list_content)
+                if numbers:
+                    return sorted([int(n) for n in numbers])
+
     except Exception as e:
         print(f"  [DEBUG] DPO extraction error: {e}")
 
@@ -70,18 +93,34 @@ def get_tema_shifts() -> list:
 
 
 def get_savgol_windows() -> list:
-    """Extract Savgol windows from 3_apply_filters.py"""
+    """Extract Savgol windows from 3_apply_filters.py (handles split ranges with + operator)"""
     try:
         filters_file = Path(__file__).parent / '3_apply_filters.py'
         if filters_file.exists():
             with open(filters_file, 'r') as f:
                 content = f.read()
-            # Look for savgol_windows = list(range(...))
+            # Look for savgol_windows = list(range(...)) + list(range(...)) or just single range
             import re
-            match = re.search(r'savgol_windows\s*=\s*list\(range\((\d+),\s*(\d+)\)\)', content)
-            if match:
-                start, end = int(match.group(1)), int(match.group(2))
-                return list(range(start, end))
+
+            # First try to match split ranges with + operator
+            matches = re.findall(r'list\(range\((\d+),\s*(\d+)(?:,\s*(\d+))?\)\)', content)
+
+            if matches:
+                windows = []
+                for match in matches:
+                    start, end = int(match[0]), int(match[1])
+                    step = int(match[2]) if match[2] else 1
+                    windows.extend(list(range(start, end, step)))
+
+                # Remove duplicates while preserving order
+                seen = set()
+                result = []
+                for w in windows:
+                    if w not in seen:
+                        result.append(w)
+                        seen.add(w)
+
+                return sorted(result)
     except Exception as e:
         print(f"  [DEBUG] Savgol extraction error: {e}")
 
@@ -169,25 +208,31 @@ def main():
     print("PARAMETER SELECTION FREQUENCY ANALYSIS")
     print("=" * 120)
 
-    # Load backtest results
-    n3_file = DATA_DIR / 'bayesian_backtest_N3.csv'
-    n4_file = DATA_DIR / 'bayesian_backtest_N4.csv'
+    # Dynamically find all backtest result files
+    import re
+    backtest_files = sorted(DATA_DIR.glob('bayesian_backtest_N*.csv'))
 
-    if not n3_file.exists() or not n4_file.exists():
-        print(f"ERROR: Backtest results not found!")
-        print(f"  Expected: {n3_file}")
-        print(f"  Expected: {n4_file}")
+    if not backtest_files:
+        print(f"ERROR: No backtest results found!")
+        print(f"  Expected pattern: {DATA_DIR}/bayesian_backtest_N*.csv")
         return 1
 
-    df_n3 = pd.read_csv(n3_file)
-    df_n4 = pd.read_csv(n4_file)
+    # Extract N values and load files
+    params_by_n = {}
+    for filepath in backtest_files:
+        match = re.search(r'N(\d+)', filepath.name)
+        if match:
+            n_value = int(match.group(1))
+            df = pd.read_csv(filepath)
+            print(f"Loaded N={n_value} results: {len(df)} months")
+            params_by_n[n_value] = analyze_parameters(df)
 
-    print(f"\nLoaded N=3 results: {len(df_n3)} months")
-    print(f"Loaded N=4 results: {len(df_n4)} months")
+    if not params_by_n:
+        print("ERROR: Could not extract N values from backtest files")
+        return 1
 
-    # Analyze each
-    params_n3 = analyze_parameters(df_n3)
-    params_n4 = analyze_parameters(df_n4)
+    # Get sorted list of N values
+    n_values = sorted(params_by_n.keys())
 
     # Extract parameter ranges from actual pipeline code
     print("\nExtracting parameter ranges from pipeline code...")
@@ -211,26 +256,97 @@ def main():
     print(f"  Savgol windows: {savgol_windows[0]}d to {savgol_windows[-1]}d ({len(savgol_windows)} total)")
 
     # ========================================================================
-    # DPO PERIODS TABLE
+    # DPO PERIODS TABLE (with split range detection)
     # ========================================================================
     print("\n" + "=" * 120)
     print("DPO PERIODS (days)")
     print("=" * 120)
-    print(f"{'Period':>10} {'N=3':>8} {'N=4':>8} {'Total':>8}")
-    print("-" * 120)
 
-    for period in dpo_periods:
-        count_n3 = params_n3['dpo'].get(period, 0)
-        count_n4 = params_n4['dpo'].get(period, 0)
-        total = count_n3 + count_n4
+    # Detect splits in ranges (gaps > step size indicate separate ranges)
+    splits = []
+    if len(dpo_periods) > 1:
+        # Calculate expected step from first consecutive pair
+        step = dpo_periods[1] - dpo_periods[0]
 
-        used = "✓" if total > 0 else " "
-        print(f"{period:>9}d {count_n3:>8} {count_n4:>8} {total:>8}")
+        # Find gaps (where difference > step)
+        for i in range(len(dpo_periods) - 1):
+            if dpo_periods[i + 1] - dpo_periods[i] > step:
+                splits.append((dpo_periods[:i + 1], dpo_periods[i + 1:]))
+                break
 
-    # Summary
-    print("-" * 120)
-    used_count = sum(1 for p in dpo_periods if params_n3['dpo'].get(p, 0) + params_n4['dpo'].get(p, 0) > 0)
-    print(f"{'SUMMARY':>10} - Used: {used_count}/{len(dpo_periods)}, Unused: {len(dpo_periods) - used_count}/{len(dpo_periods)}")
+    # Build dynamic header based on available N values
+    header = f"{'Period':>10}"
+    for n in n_values:
+        header += f" {'N=' + str(n):>8}"
+    header += f" {'Total':>8}"
+
+    # Print splits separately if detected, otherwise print as one
+    if splits:
+        range1, range2 = splits[0]
+
+        # Range 1
+        print(f"SHORT-TERM: {range1[0]}d to {range1[-1]}d")
+        print(header)
+        print("-" * 120)
+        for period in range1:
+            row = f"{period:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['dpo'].get(period, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        used_count_1 = sum(1 for p in range1 if sum(params_by_n[n]['dpo'].get(p, 0) for n in n_values) > 0)
+        print("-" * 120)
+        print(f"{'SUMMARY':>10} - Used: {used_count_1}/{len(range1)}, Unused: {len(range1) - used_count_1}/{len(range1)}")
+
+        # Range 2
+        print(f"\nMEDIUM-TERM: {range2[0]}d to {range2[-1]}d")
+        print(header)
+        print("-" * 120)
+        for period in range2:
+            row = f"{period:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['dpo'].get(period, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        used_count_2 = sum(1 for p in range2 if sum(params_by_n[n]['dpo'].get(p, 0) for n in n_values) > 0)
+        print("-" * 120)
+        print(f"{'SUMMARY':>10} - Used: {used_count_2}/{len(range2)}, Unused: {len(range2) - used_count_2}/{len(range2)}")
+
+        # Combined summary
+        print("-" * 120)
+        total_used = used_count_1 + used_count_2
+        total_periods = len(dpo_periods)
+        print(f"{'COMBINED':>10} - Used: {total_used}/{total_periods}, Unused: {total_periods - total_used}/{total_periods}")
+    else:
+        # No splits, print normally
+        print(header)
+        print("-" * 120)
+
+        for period in dpo_periods:
+            row = f"{period:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['dpo'].get(period, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        # Summary
+        print("-" * 120)
+        used_count = sum(1 for p in dpo_periods if sum(params_by_n[n]['dpo'].get(p, 0) for n in n_values) > 0)
+        print(f"{'SUMMARY':>10} - Used: {used_count}/{len(dpo_periods)}, Unused: {len(dpo_periods) - used_count}/{len(dpo_periods)}")
 
     # ========================================================================
     # TEMA SHIFTS TABLE
@@ -238,42 +354,124 @@ def main():
     print("\n" + "=" * 120)
     print("TEMA SHIFTS (divisors, range order, step 0.1)")
     print("=" * 120)
-    print(f"{'Shift':>10} {'N=3':>8} {'N=4':>8} {'Total':>8}")
+
+    # Build dynamic header
+    tema_header = f"{'Shift':>10}"
+    for n in n_values:
+        tema_header += f" {'N=' + str(n):>8}"
+    tema_header += f" {'Total':>8}"
+    print(tema_header)
     print("-" * 120)
 
     for shift_str in tema_shifts:
         shift_val = float(shift_str)
-        count_n3 = int(params_n3['tema'].get(shift_val, 0))
-        count_n4 = int(params_n4['tema'].get(shift_val, 0))
-        total = count_n3 + count_n4
-
-        print(f"{shift_str:>10} {count_n3:>8} {count_n4:>8} {total:>8}")
+        row = f"{shift_str:>10}"
+        counts = []
+        for n in n_values:
+            count = int(params_by_n[n]['tema'].get(shift_val, 0))
+            row += f" {count:>8}"
+            counts.append(count)
+        total = sum(counts)
+        row += f" {total:>8}"
+        print(row)
 
     # Summary
     print("-" * 120)
-    used_count = sum(1 for s_str in tema_shifts if int(params_n3['tema'].get(float(s_str), 0)) + int(params_n4['tema'].get(float(s_str), 0)) > 0)
+    used_count = sum(1 for s_str in tema_shifts if sum(int(params_by_n[n]['tema'].get(float(s_str), 0)) for n in n_values) > 0)
     print(f"{'SUMMARY':>10} - Used: {used_count}/{len(tema_shifts)}, Unused: {len(tema_shifts) - used_count}/{len(tema_shifts)}")
 
     # ========================================================================
-    # SAVGOL WINDOWS TABLE
+    # SAVGOL WINDOWS TABLE (with split range detection)
     # ========================================================================
     print("\n" + "=" * 120)
     print("SAVGOL WINDOWS (days)")
     print("=" * 120)
-    print(f"{'Window':>10} {'N=3':>8} {'N=4':>8} {'Total':>8}")
-    print("-" * 120)
 
-    for window in savgol_windows:
-        count_n3 = params_n3['savgol'].get(window, 0)
-        count_n4 = params_n4['savgol'].get(window, 0)
-        total = count_n3 + count_n4
+    # Detect splits in ranges (gaps > step size indicate separate ranges)
+    splits = []
+    if len(savgol_windows) > 1:
+        # Calculate expected step from first consecutive pair
+        step = savgol_windows[1] - savgol_windows[0]
 
-        print(f"{window:>9}d {count_n3:>8} {count_n4:>8} {total:>8}")
+        # Find gaps (where difference > step)
+        for i in range(len(savgol_windows) - 1):
+            if savgol_windows[i + 1] - savgol_windows[i] > step:
+                splits.append((savgol_windows[:i + 1], savgol_windows[i + 1:]))
+                break
 
-    # Summary
-    print("-" * 120)
-    used_count = sum(1 for w in savgol_windows if params_n3['savgol'].get(w, 0) + params_n4['savgol'].get(w, 0) > 0)
-    print(f"{'SUMMARY':>10} - Used: {used_count}/{len(savgol_windows)}, Unused: {len(savgol_windows) - used_count}/{len(savgol_windows)}")
+    # Build dynamic header
+    savgol_header = f"{'Window':>10}"
+    for n in n_values:
+        savgol_header += f" {'N=' + str(n):>8}"
+    savgol_header += f" {'Total':>8}"
+
+    # Print splits separately if detected, otherwise print as one
+    if splits:
+        range1, range2 = splits[0]
+
+        # Range 1
+        print(f"SHORT-TERM: {range1[0]}d to {range1[-1]}d")
+        print(savgol_header)
+        print("-" * 120)
+        for window in range1:
+            row = f"{window:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['savgol'].get(window, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        used_count_1 = sum(1 for w in range1 if sum(params_by_n[n]['savgol'].get(w, 0) for n in n_values) > 0)
+        print("-" * 120)
+        print(f"{'SUMMARY':>10} - Used: {used_count_1}/{len(range1)}, Unused: {len(range1) - used_count_1}/{len(range1)}")
+
+        # Range 2
+        print(f"\nMEDIUM-TERM: {range2[0]}d to {range2[-1]}d")
+        print(savgol_header)
+        print("-" * 120)
+        for window in range2:
+            row = f"{window:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['savgol'].get(window, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        used_count_2 = sum(1 for w in range2 if sum(params_by_n[n]['savgol'].get(w, 0) for n in n_values) > 0)
+        print("-" * 120)
+        print(f"{'SUMMARY':>10} - Used: {used_count_2}/{len(range2)}, Unused: {len(range2) - used_count_2}/{len(range2)}")
+
+        # Combined summary
+        print("-" * 120)
+        total_used = used_count_1 + used_count_2
+        total_windows = len(savgol_windows)
+        print(f"{'COMBINED':>10} - Used: {total_used}/{total_windows}, Unused: {total_windows - total_used}/{total_windows}")
+    else:
+        # No splits, print normally
+        print(savgol_header)
+        print("-" * 120)
+
+        for window in savgol_windows:
+            row = f"{window:>9}d"
+            counts = []
+            for n in n_values:
+                count = params_by_n[n]['savgol'].get(window, 0)
+                row += f" {count:>8}"
+                counts.append(count)
+            total = sum(counts)
+            row += f" {total:>8}"
+            print(row)
+
+        # Summary
+        print("-" * 120)
+        used_count = sum(1 for w in savgol_windows if sum(params_by_n[n]['savgol'].get(w, 0) for n in n_values) > 0)
+        print(f"{'SUMMARY':>10} - Used: {used_count}/{len(savgol_windows)}, Unused: {len(savgol_windows) - used_count}/{len(savgol_windows)}")
 
     print("\n" + "=" * 120)
 
