@@ -100,6 +100,37 @@ def get_monthly_dates(start_date=None, end_date=None):
     ).tolist()
 
 
+def map_month_ends_to_trading_dates(monthly_dates, trading_dates):
+    """
+    Map theoretical month-end dates to actual trading dates.
+
+    Handles weekends and holidays: if a month-end date is not a trading day,
+    uses the next trading day (which will be in the next month).
+
+    Args:
+        monthly_dates: Array of theoretical month-end dates
+        trading_dates: Array of actual trading dates (sorted)
+
+    Returns:
+        Array of actual trading dates (one per month-end, or next trading day if month-end is weekend/holiday)
+    """
+    actual_trading_dates = np.zeros(len(monthly_dates), dtype='datetime64[ns]')
+
+    for i, month_end in enumerate(monthly_dates):
+        # Find closest trading date at or after this month-end
+        idx = np.searchsorted(trading_dates, month_end, side='left')
+
+        if idx < len(trading_dates):
+            # Found a trading date at or after this month-end
+            actual_trading_dates[i] = trading_dates[idx]
+        else:
+            # No trading date at or after this month-end (shouldn't happen in normal cases)
+            # Use the last available trading date
+            actual_trading_dates[i] = trading_dates[-1]
+
+    return actual_trading_dates
+
+
 def load_single_etf(args):
     """Load a single ETF's price data (for parallel loading)."""
     isin, db_path = args
@@ -250,7 +281,10 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
 
     # Start from 2015 or data start (whichever is later), end at data end
     start_date = max(pd.Timestamp('2015-01-01'), data_start)
-    monthly_dates = get_monthly_dates(start_date=start_date, end_date=data_end)
+    # Extend end_date by horizon_value months to ensure we have forward periods for all data
+    # E.g., if horizon is 1 month, extend by 1 month so last month in data has a forward period
+    extended_end_date = data_end + pd.DateOffset(months=horizon_value)
+    monthly_dates = get_monthly_dates(start_date=start_date, end_date=extended_end_date)
     monthly_dates_arr = np.array(monthly_dates, dtype='datetime64[ns]')
     print(f"  Generated {len(monthly_dates)} monthly dates ({monthly_dates[0].date()} to {monthly_dates[-1].date()})")
 
@@ -258,12 +292,19 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
     trading_dates = price_df.index.values
 
     print(f"\n  Price matrix: {price_df.shape[0]} days × {price_df.shape[1]} ETFs")
-    print(f"  Date range: {price_df.index[0].date()} to {price_df.index[-1].date()}")
+    print(f"  Data range: {price_df.index[0].date()} to {price_df.index[-1].date()}")
 
-    # Map monthly test dates to actual trading dates
-    print(f"\nMapping monthly dates to trading dates...")
-    start_indices = np.searchsorted(trading_dates, monthly_dates_arr[:-horizon_value])
-    end_indices = np.searchsorted(trading_dates, monthly_dates_arr[horizon_value:])
+    # Map monthly test dates to actual trading dates (handles weekends/holidays)
+    print(f"\nMapping {horizon_value}-month periods to actual trading dates...")
+    actual_monthly_trading_dates = map_month_ends_to_trading_dates(monthly_dates_arr, trading_dates)
+
+    # Pair start and end dates for forward periods
+    start_dates = actual_monthly_trading_dates[:-horizon_value]
+    end_dates = actual_monthly_trading_dates[horizon_value:]
+
+    # Get indices in trading_dates for all start and end dates
+    start_indices = np.searchsorted(trading_dates, start_dates)
+    end_indices = np.searchsorted(trading_dates, end_dates)
 
     # Filter valid indices (within bounds)
     valid_mask = (start_indices < len(trading_dates)) & (end_indices < len(trading_dates))
@@ -271,7 +312,7 @@ def compute_forward_ir(horizon=HOLDING_MONTHS):
     valid_end_idx = end_indices[valid_mask]
 
     n_periods = len(valid_start_idx)
-    print(f"  Valid periods: {n_periods}")
+    print(f"  Valid periods: {n_periods} (out of {len(start_indices)} total)")
 
     # Get prices at start and end dates (vectorized)
     print(f"\nComputing returns (vectorized)...")

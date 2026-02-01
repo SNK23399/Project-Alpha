@@ -39,6 +39,9 @@ from support.etf_database import ETFDatabase
 # Core ETF (benchmark) - iShares Core MSCI World UCITS ETF USD (Acc)
 CORE_ISIN = 'IE00B4L5Y983'
 
+# Number of satellites (can be overridden by command-line argument)
+N_SATELLITES = 3  # Options: 3, 4, 5 (based on available backtest files)
+
 # Allocation split
 CORE_ALLOCATION_PCT = 0.60  # 60% to core
 SATELLITE_ALLOCATION_PCT = 0.40  # 40% to satellites
@@ -50,18 +53,20 @@ DB_PATH = Path(__file__).parent.parent / 'maintenance' / 'data' / 'etf_database.
 BACKTEST_DIR = Path(__file__).parent / 'data' / 'backtest_results'
 
 
-def get_latest_selected_satellites():
+def get_latest_selected_satellites(n_satellites):
     """
     Read latest backtest results to get selected satellite ISINs.
 
+    Args:
+        n_satellites: Number of satellites (3, 4, or 5)
+
     Returns:
-        List of selected satellite ISINs
+        Tuple of (list of selected satellite ISINs, backtest date)
     """
-    # Read N3 backtest (best performer based on summary)
-    backtest_file = BACKTEST_DIR / 'bayesian_backtest_N3.csv'
+    backtest_file = BACKTEST_DIR / f'bayesian_backtest_N{n_satellites}.csv'
 
     if not backtest_file.exists():
-        raise FileNotFoundError(f"Backtest file not found: {backtest_file}")
+        raise FileNotFoundError(f"Backtest file not found: {backtest_file}\nAvailable options: N3, N4, N5")
 
     df = pd.read_csv(backtest_file)
 
@@ -262,30 +267,35 @@ def print_allocation(budget, core_isin, satellite_isins, prices, names, quantiti
 
 
 def main():
-    """Main entry point."""
+    """
+    Main entry point - generates allocations for N=3, 4, and 5 satellites.
+    Asks user for budget once, then shows all three allocation scenarios.
+    """
     print("\n" + "=" * 120)
-    print("STEP 7: GENERATE MONTHLY PORTFOLIO ALLOCATION")
+    print("STEP 7: GENERATE MONTHLY PORTFOLIO ALLOCATION (N=3, 4, 5)")
     print("=" * 120)
 
     try:
-        # Get latest satellite selections
-        print("\n  Reading latest backtest results...")
-        satellite_isins, backtest_date = get_latest_selected_satellites()
-        n_satellites = len(satellite_isins)
-        print(f"  [OK] Found {n_satellites} selected satellites (backtest date: {backtest_date})")
-        print(f"       ISINs: {', '.join(satellite_isins)}")
+        # Get satellite selections from backtest
+        satellite_isins_temp, backtest_date_temp = get_latest_selected_satellites(3)
+        from datetime import datetime
+        backtest_dt = pd.to_datetime(backtest_date_temp)
 
-        # Get prices
-        print("\n  Loading current ETF prices...")
-        all_isins = [CORE_ISIN] + satellite_isins
-        prices = get_current_prices(all_isins)
-        print(f"  [OK] Loaded prices for {len(prices)} ETFs")
+        # Investment month is determined by backtest date
+        # Backtest through month N (e.g., Nov) shows signals validated knowing month N+1 results (e.g., Dec)
+        # Apply those signals to month N+1 data to predict for month N+2 (e.g., Jan)
+        invest_month_offset = backtest_dt.month + 2
+        if invest_month_offset > 12:
+            invest_month = invest_month_offset - 12
+            invest_year = backtest_dt.year + 1
+        else:
+            invest_month = invest_month_offset
+            invest_year = backtest_dt.year
+        month_names = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                       'July', 'August', 'September', 'October', 'November', 'December']
+        invest_month_str = f"{month_names[invest_month]} {invest_year}"
 
-        # Get names
-        print("\n  Loading ETF names...")
-        names = get_etf_names(all_isins)
-
-        # Ask for budget
+        # Ask for budget once
         print("\n" + "-" * 120)
         while True:
             try:
@@ -298,29 +308,59 @@ def main():
             except ValueError:
                 print("  Error: Please enter a valid number")
         print("-" * 120)
+        print(f"\n  Investing for: {invest_month_str}\n")
 
-        # Calculate allocations
-        print("\n  Calculating allocation...")
+        # Generate allocations for N=3, 4, 5
+        results = {}
+        for n_satellites in [3, 4, 5]:
+            print(f"\n\nGenerating allocation for N={n_satellites} satellites...")
+            print("=" * 120)
 
-        core_target = budget * CORE_ALLOCATION_PCT
-        satellite_per_target = budget * SATELLITE_ALLOCATION_PCT / n_satellites
+            try:
+                # Get latest satellite selections
+                satellite_isins, backtest_date = get_latest_selected_satellites(n_satellites)
+                n_satellites_selected = len(satellite_isins)
+                print(f"  [OK] Found {n_satellites_selected} selected satellites (backtest date: {backtest_date})")
+                print(f"       ISINs: {', '.join(satellite_isins)}")
 
-        allocations = {
-            CORE_ISIN: core_target
-        }
-        for isin in satellite_isins:
-            allocations[isin] = satellite_per_target
+                # Get prices
+                all_isins = [CORE_ISIN] + satellite_isins
+                prices = get_current_prices(all_isins)
 
-        # Optimize quantities
-        quantities, invested = optimize_quantities(budget, allocations, prices)
-        print(f"  [OK] Calculated quantities for {len(quantities)} ETFs")
+                # Get names
+                names = get_etf_names(all_isins)
 
-        # Print results
-        print_allocation(budget, CORE_ISIN, satellite_isins, prices, names, quantities, invested)
+                # Calculate allocations
+                print("\n  Calculating allocation...")
+                core_target = budget * CORE_ALLOCATION_PCT
+                satellite_per_target = budget * SATELLITE_ALLOCATION_PCT / n_satellites_selected
 
-        print("\n  [OK] Allocation generation completed")
+                allocations = {
+                    CORE_ISIN: core_target
+                }
+                for isin in satellite_isins:
+                    allocations[isin] = satellite_per_target
 
-        return {'status': 'completed', 'budget': budget, 'n_satellites': n_satellites}
+                # Optimize quantities
+                quantities, invested = optimize_quantities(budget, allocations, prices)
+
+                # Print results
+                print_allocation(budget, CORE_ISIN, satellite_isins, prices, names, quantities, invested)
+
+                results[n_satellites] = {
+                    'status': 'completed',
+                    'n_satellites': n_satellites_selected,
+                    'satellite_isins': satellite_isins,
+                    'quantities': quantities,
+                    'invested': invested,
+                    'uninvested_cash': budget - invested
+                }
+
+            except Exception as e:
+                print(f"  [ERROR] generating allocation for N={n_satellites}: {str(e)}")
+                results[n_satellites] = {'status': 'failed', 'error': str(e)}
+
+        return {'status': 'completed', 'budget': budget, 'results': results}
 
     except Exception as e:
         print(f"\n  [ERROR] in step 7: {str(e)}")
