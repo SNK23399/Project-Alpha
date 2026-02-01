@@ -11,16 +11,17 @@ Workflow:
   4. Precompute feature-IR matrix (signal predictions)
   5. Compute empirical IR statistics
   6. Evaluate deterministic strategies with IR metrics
+  7. Generate monthly portfolio allocation
 
 Usage:
-  python main.py                           # All steps (1,2,3,4,5,6)
+  python main.py                           # All steps (1,2,3,4,5,6,7)
   python main.py --steps 1,2,3,4,5,6       # Run specific steps (comma-separated)
-  python main.py --only-step 6             # Run only one step
+  python main.py --only-step 7             # Run only one step
 
 Examples:
   python main.py                           # Run full pipeline
   python main.py --steps 4,5,6             # Skip to feature-IR computation
-  python main.py --only-step 6             # Only run strategy evaluation
+  python main.py --only-step 7             # Only run allocation generation
 """
 
 import sys
@@ -37,6 +38,7 @@ class WalkForwardSatelliteSelectionPipeline:
 
     Steps 1-3: Compute target variable (forward IR), DPO signals, and post-processing filter.
     Steps 4-6: Precompute feature-IR matrix, compute IR statistics, and evaluate strategies.
+    Step 7: Generate monthly portfolio allocation based on latest backtest results.
     """
 
     def __init__(self, pipeline_dir=None):
@@ -321,21 +323,59 @@ class WalkForwardSatelliteSelectionPipeline:
             print(f"\n  [ERROR] in step 6: {str(e)}")
             raise
 
+    # ========================================================================
+    # STEP 7: Generate Monthly Portfolio Allocation
+    # ========================================================================
+
+    def step_7_generate_allocation(self) -> dict:
+        """
+        Step 7: Generate Monthly Portfolio Allocation
+
+        Converts latest backtest results to actual portfolio allocation.
+        Reads user input for total budget and generates allocation recommendations
+        with 60/40 core-satellite split.
+        """
+        self.print_header("Generate Monthly Portfolio Allocation", "7")
+
+        try:
+            script_path = self.pipeline_dir / '7_generate_monthly_allocation.py'
+
+            if not script_path.exists():
+                raise FileNotFoundError(f"Script not found: {script_path}")
+
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(self.pipeline_dir),
+                capture_output=False,
+                check=False
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"Allocation generation failed with code {result.returncode}")
+
+            self.print_progress("Monthly allocation generated successfully")
+
+            return {'status': 'completed'}
+
+        except Exception as e:
+            print(f"\n  [ERROR] in step 7: {str(e)}")
+            raise
+
 
     def run(self, steps: list = None) -> dict:
         """
         Execute the pipeline (selected steps or all steps).
 
         Args:
-            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6']).
-                   If None, execute all steps in order: ['1', '2', '3', '4', '5', '6']
+            steps: List of step names to execute (e.g., ['1', '2', '3', '4', '5', '6', '7']).
+                   If None, execute all steps in order: ['1', '2', '3', '4', '5', '6', '7']
 
         Returns:
             Dictionary with all results
         """
-        # Default to steps 1-6 if none specified
+        # Default to steps 1-7 if none specified
         if steps is None:
-            steps = ['1', '2', '3', '4', '5', '6']
+            steps = ['1', '2', '3', '4', '5', '6', '7']
 
         # Map step names to methods
         step_methods = {
@@ -345,6 +385,7 @@ class WalkForwardSatelliteSelectionPipeline:
             '4': self.step_4_precompute_feature_ir,
             '5': self.step_5_precompute_mc_ir_stats,
             '6': self.step_6_bayesian_strategy,
+            '7': self.step_7_generate_allocation,
         }
 
         # Validate requested steps
@@ -385,10 +426,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                           # All steps (1,2,3,4,5,6)
+  python main.py                           # All steps (1,2,3,4,5,6,7)
   python main.py --steps 2,3               # Only steps 2 & 3
   python main.py --steps 4,5,6             # Feature-IR through strategy evaluation
-  python main.py --only-step 6             # Only step 6 (strategy evaluation)
+  python main.py --only-step 7             # Only step 7 (generate allocation)
         """
     )
 
@@ -396,7 +437,7 @@ Examples:
         '--steps',
         type=str,
         default=None,
-        help='Comma-separated list of steps to run (e.g., "1,2,3,4,5,6"). Default: all steps'
+        help='Comma-separated list of steps to run (e.g., "1,2,3,4,5,6,7"). Default: all steps'
     )
 
     parser.add_argument(
