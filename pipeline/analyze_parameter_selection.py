@@ -73,19 +73,29 @@ def get_dpo_periods() -> list:
 
 
 def get_tema_shifts() -> list:
-    """Extract TEMA shift divisors from dpo_enhanced_variants.py"""
+    """Extract TEMA shift divisors from dpo_enhanced_variants.py (handles np.arange or hardcoded lists)"""
     try:
         dpo_file = LIB_DIR / 'dpo_enhanced_variants.py'
         if dpo_file.exists():
             with open(dpo_file, 'r') as f:
                 content = f.read()
-            # Look for np.arange(...) in tema_shift_divisors line
             import re
+
+            # First try to match np.arange(...) pattern
             match = re.search(r'for x in np\.arange\(([\d.]+),\s*([\d.]+),\s*([\d.]+)\)', content)
             if match:
                 start, end, step = float(match.group(1)), float(match.group(2)), float(match.group(3))
                 shifts = [f'{x:.1f}' for x in np.arange(start, end, step)]
                 return shifts
+
+            # If no np.arange found, try to match hardcoded list like [1.0, 2.0]
+            list_match = re.search(r'for x in (\[[\d.,\s]+\])', content)
+            if list_match:
+                list_str = list_match.group(1)
+                # Extract all numbers from the list
+                numbers = re.findall(r'[\d.]+', list_str)
+                if numbers:
+                    return [f'{float(n):.1f}' for n in numbers]
     except Exception as e:
         print(f"  [DEBUG] TEMA extraction error: {e}")
 
@@ -93,13 +103,12 @@ def get_tema_shifts() -> list:
 
 
 def get_savgol_windows() -> list:
-    """Extract Savgol windows from 3_apply_filters.py (handles split ranges with + operator)"""
+    """Extract Savgol windows from 3_apply_filters.py (handles split ranges, + operator, or hardcoded lists)"""
     try:
         filters_file = Path(__file__).parent / '3_apply_filters.py'
         if filters_file.exists():
             with open(filters_file, 'r') as f:
                 content = f.read()
-            # Look for savgol_windows = list(range(...)) + list(range(...)) or just single range
             import re
 
             # First try to match split ranges with + operator
@@ -121,6 +130,15 @@ def get_savgol_windows() -> list:
                         seen.add(w)
 
                 return sorted(result)
+
+            # If no ranges found, try to match hardcoded list like [7, 14, 21, 28]
+            list_match = re.search(r'savgol_windows\s*=\s*(\[[\d.,\s]+\])', content)
+            if list_match:
+                list_str = list_match.group(1)
+                # Extract all numbers from the list
+                numbers = re.findall(r'\d+', list_str)
+                if numbers:
+                    return sorted([int(n) for n in numbers])
     except Exception as e:
         print(f"  [DEBUG] Savgol extraction error: {e}")
 

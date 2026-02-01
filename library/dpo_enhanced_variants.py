@@ -53,9 +53,10 @@ def compute_dpo_variants_generator(
     """
     Generator that yields TEMA-only DPO variants with broad exploratory scope.
 
-    For each DPO period (21d, 42d, 63d), computes TEMA with 1 shift divisor.
+    For each DPO period (21d, 42d, 63d), computes TEMA with 2 shift divisors.
 
-    TEMA Shift Divisor:
+    TEMA Shift Divisors:
+    - tema__shift_1_0 (responsive): shift = period / 1.0
     - tema__shift_2_0 (conservative): shift = period / 2.0
 
     Yields:
@@ -76,10 +77,10 @@ def compute_dpo_variants_generator(
 
     # TEMA shift divisors to optimize lag-alignment
     # TEMA's lower lag (period/4-5) vs standard shift (period/2+1) creates misalignment
-    # Conservative shift: period / 2.0
+    # Two shifts: responsive (1.0) and conservative (2.0)
     tema_shift_divisors = {
         f'tema__shift_{x:.1f}'.replace('.', '_'): lambda p, div=x: max(1, int(p / div))
-        for x in [2.0]
+        for x in [1.0, 2.0]
     }
 
     for dpo_period in dpo_periods:
@@ -107,16 +108,16 @@ def compute_dpo_variants_generator(
 def count_dpo_variants() -> int:
     """Count total DPO variants that will be generated."""
     dpo_periods = [21, 42, 63]
-    tema_shifts = 1  # Only shift 2.0
+    tema_shifts = 2  # Shifts: 1.0 and 2.0
     return len(dpo_periods) * tema_shifts
 
 
 if __name__ == "__main__":
     dpo_periods = [21, 42, 63]
-    tema_shifts = [2.0]
+    tema_shifts = [1.0, 2.0]
     total = len(dpo_periods) * len(tema_shifts)
 
     print(f"DPO Enhanced Variants Library")
     print(f"Total variants: {total}")
     print(f"  Periods: {dpo_periods}")
-    print(f"  TEMA shift divisor: {tema_shifts[0]:.1f}")
+    print(f"  TEMA shift divisors: {tema_shifts}")

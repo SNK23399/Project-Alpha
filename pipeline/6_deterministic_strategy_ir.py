@@ -72,8 +72,8 @@ MIN_TRAINING_MONTHS = 12  # Warm-up period for empirical prior estimation
 REOPTIMIZATION_FREQUENCY = 1
 
 # Feature selection parameters
-MIN_ENSEMBLE_SIZE = 100  # Minimum features for stability
-MAX_ENSEMBLE_SIZE = 100
+MIN_ENSEMBLE_SIZE = 25  # Minimum features for stability
+MAX_ENSEMBLE_SIZE = 25
 SELECTION_METHOD = 'greedy_bayesian'
 GREEDY_CANDIDATES = 30
 DEFAULT_GREEDY_IMPROVEMENT_THRESHOLD = 0.001
