@@ -286,7 +286,7 @@ def main():
 
     # Savgol parameters
     savgol_windows = list(range(6, 37, 1))
-    savgol_polyorders = [2, 3]  # Polyorders: 2 and 3
+    savgol_polyorders = [4]  # Polyorder: 4 (quartic - heavy smoothing)
     n_savgol_variants = len(savgol_windows) * len(savgol_polyorders)
 
     # Only use Savitzky-Golay filter (ensemble-validated best performer)
