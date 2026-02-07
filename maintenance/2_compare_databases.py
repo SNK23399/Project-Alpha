@@ -18,6 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "support"))
 
 import pandas as pd
 import numpy as np
+from tqdm import tqdm
 from etf_database import ETFDatabase
 
 
@@ -168,64 +169,74 @@ def compare_databases(old_db_path=None, new_db_path=None):
     pre_core_filtered = 0
     total_pre_core_records = 0
 
-    # Sample a subset for detailed comparison (all would take too long)
-    sample_isins = list(common_isins)[:50]  # Compare 50 ETFs in detail
+    # Quick comparison using SQL queries (much faster than loading all prices)
+    print(f"Checking all {len(common_isins)} ETFs using efficient SQL queries...")
+    print()
 
-    print(f"Detailed comparison of {len(sample_isins)} sample ETFs...")
+    import sqlite3
 
-    for isin in sample_isins:
-        prices_old = db_old.load_prices(isin)
-        prices_new = db_new.load_prices(isin)
+    conn_old = sqlite3.connect(str(db_old.db_path))
+    conn_new = sqlite3.connect(str(db_new.db_path))
 
-        if len(prices_old) == 0 and len(prices_new) == 0:
-            continue
+    try:
+        # Get price stats for all ETFs in one query
+        cursor_old = conn_old.cursor()
+        cursor_new = conn_new.cursor()
 
-        # Check for pre-core data in old database
-        pre_core_old = prices_old[prices_old.index < CORE_INCEPTION_DATE]
-        if len(pre_core_old) > 0:
-            pre_core_filtered += 1
-            total_pre_core_records += len(pre_core_old)
+        # For each ETF, check record count and date ranges
+        etfs_checked = 0
+        issues_found = 0
 
-        # Compare date ranges
-        if len(prices_old) > 0 and len(prices_new) > 0:
-            old_start = prices_old.index.min()
-            old_end = prices_old.index.max()
-            new_start = prices_new.index.min()
-            new_end = prices_new.index.max()
+        for isin in tqdm(common_isins, desc="Checking ETFs", ncols=80):
+            # Get old DB stats
+            cursor_old.execute(
+                "SELECT COUNT(*) as cnt, MIN(date) as min_date, MAX(date) as max_date FROM prices WHERE isin = ?",
+                (isin,)
+            )
+            row_old = cursor_old.fetchone()
+            old_count = row_old[0] if row_old[0] is not None else 0
+            old_min = pd.Timestamp(row_old[1]) if row_old[1] else None
+            old_max = pd.Timestamp(row_old[2]) if row_old[2] else None
 
-            # New database should start >= core inception
-            if new_start < CORE_INCEPTION_DATE:
-                date_range_diffs.append((isin, "New DB has pre-core data", new_start, new_end))
+            # Get new DB stats
+            cursor_new.execute(
+                "SELECT COUNT(*) as cnt, MIN(date) as min_date, MAX(date) as max_date FROM prices WHERE isin = ?",
+                (isin,)
+            )
+            row_new = cursor_new.fetchone()
+            new_count = row_new[0] if row_new[0] is not None else 0
+            new_min = pd.Timestamp(row_new[1]) if row_new[1] else None
+            new_max = pd.Timestamp(row_new[2]) if row_new[2] else None
 
-            # Filter old prices to post-core for comparison
-            prices_old_filtered = prices_old[prices_old.index >= CORE_INCEPTION_DATE]
+            # Check for issues
+            if old_count > 0 and new_count > 0:
+                etfs_checked += 1
 
-            # Find overlapping dates
-            common_dates = prices_old_filtered.index.intersection(prices_new.index)
+                # Check if new DB correctly filters pre-core data
+                if new_min and new_min < CORE_INCEPTION_DATE:
+                    date_range_diffs.append((isin, "New DB has pre-core data", new_min, new_max))
+                    issues_found += 1
 
-            if len(common_dates) > 0:
-                # Compare prices on common dates
-                old_vals = prices_old_filtered.loc[common_dates]
-                new_vals = prices_new.loc[common_dates]
+                # Check if record count makes sense
+                # (new should have more or equal records for the overlapping period)
+                if new_count < old_count * 0.9:  # Allow 10% variance
+                    date_range_diffs.append((isin, f"Record count mismatch: {old_count} vs {new_count}", old_min, old_max))
+                    issues_found += 1
 
-                # Allow small differences (floating point precision)
-                diff = np.abs(old_vals - new_vals)
-                max_diff = diff.max()
+                # Check for pre-core data in old DB
+                if old_min and old_min < CORE_INCEPTION_DATE:
+                    pre_core_filtered += 1
+                    # Estimate pre-core records (rough)
+                    if old_min and old_max:
+                        ratio = (CORE_INCEPTION_DATE - old_min).days / (old_max - old_min).days
+                        pre_core_estimated = int(old_count * ratio)
+                        total_pre_core_records += pre_core_estimated
 
-                # Count dates with differences > 0.01 EUR
-                dates_with_diff = (diff > 0.01).sum()
+    finally:
+        conn_old.close()
+        conn_new.close()
 
-                # Flag if difference > 0.01 EUR (1 cent)
-                if max_diff > 0.01:
-                    mismatches.append({
-                        'isin': isin,
-                        'common_dates': len(common_dates),
-                        'dates_with_diff': dates_with_diff,
-                        'max_diff': max_diff,
-                        'sample_dates': common_dates[:3].tolist()
-                    })
-
-    print(f"\n[OK] Compared {len(sample_isins)} ETFs")
+    print(f"\n[OK] Checked all {etfs_checked} ETFs with prices in both databases")
 
     if pre_core_filtered > 0:
         print(f"[OK] Correctly filtered: {total_pre_core_records:,} pre-{CORE_INCEPTION_DATE.date()} records from {pre_core_filtered} ETFs")

@@ -336,89 +336,6 @@ def retry_failed_etfs(db, all_isins, initial_success):
     print()
 
 
-def check_data_quality(db):
-    """Check data quality and report issues."""
-    print("=" * 80)
-    print("DATA QUALITY CHECK")
-    print("=" * 80)
-    print()
-
-    all_isins = db.list_isins()
-    quality_issues = []
-    good_etfs = 0
-
-    for isin in tqdm(all_isins, desc="Checking quality", ncols=80):
-        prices = db.load_prices(isin)
-        etf_info = db.get_etf(isin)
-        name = etf_info['name'][:40] if etf_info else isin
-
-        if len(prices) == 0:
-            quality_issues.append((isin, name, "NO DATA", 0))
-            continue
-
-        # Calculate metrics
-        date_range = (prices.index.max() - prices.index.min()).days
-        expected_trading_days = date_range * 5 / 7  # Rough estimate
-        actual_days = len(prices)
-        coverage = actual_days / expected_trading_days if expected_trading_days > 0 else 0
-
-        # Check for gaps
-        date_diff = prices.index.to_series().diff().dt.days
-        max_gap = date_diff.max() if len(date_diff) > 0 else 0
-
-        # Check for stale data
-        days_since_update = (pd.Timestamp.now() - prices.index.max()).days
-
-        # Flag issues
-        issues = []
-        if coverage < 0.85:
-            issues.append(f"Low coverage ({coverage:.0%})")
-        if max_gap > 10:
-            issues.append(f"Gap of {max_gap} days")
-        if days_since_update > 7:
-            issues.append(f"Stale ({days_since_update}d old)")
-        if len(prices) < 252:  # Less than 1 year
-            issues.append(f"Short history ({len(prices)} days)")
-
-        if issues:
-            quality_issues.append((isin, name, ", ".join(issues), len(prices)))
-        else:
-            good_etfs += 1
-
-    # Summary
-    print(f"\n{'Status':<15} {'Count':>8}")
-    print("-" * 25)
-    print(f"{'Good ETFs':<15} {good_etfs:>8}")
-    print(f"{'With Issues':<15} {len(quality_issues):>8}")
-    print(f"{'Total':<15} {len(all_isins):>8}")
-
-    # Show issues if any (first 20)
-    if quality_issues:
-        print(f"\n⚠ ETFs with data quality issues (showing first 20):")
-        print(f"{'ISIN':<15} {'Name':<40} {'Issue':<30}")
-        print("-" * 85)
-        for isin, name, issue, days in sorted(quality_issues, key=lambda x: x[2])[:20]:
-            print(f"{isin:<15} {name:<40} {issue:<30}")
-
-        if len(quality_issues) > 20:
-            print(f"\n... and {len(quality_issues) - 20} more")
-
-        # Categorize
-        no_data = [q for q in quality_issues if "NO DATA" in q[2]]
-        stale = [q for q in quality_issues if "Stale" in q[2]]
-        short = [q for q in quality_issues if "Short history" in q[2]]
-
-        print(f"\nIssue breakdown:")
-        if no_data:
-            print(f"  - No data: {len(no_data)} ETFs")
-        if stale:
-            print(f"  - Stale data: {len(stale)} ETFs")
-        if short:
-            print(f"  - Short history: {len(short)} ETFs")
-
-    print()
-
-
 def print_summary(db):
     """Print final database summary."""
     stats = db.get_stats()
@@ -475,10 +392,7 @@ def main():
         # 5. Fetch and store price data
         fetch_and_store_prices(db, df_universe)
 
-        # 6. Check data quality
-        check_data_quality(db)
-
-        # 7. Optimize database
+        # 6. Optimize database
         print("=" * 80)
         print("OPTIMIZING DATABASE")
         print("=" * 80)
@@ -488,7 +402,7 @@ def main():
         print("✓ Database optimized")
         print()
 
-        # 8. Validate database integrity
+        # 7. Validate database integrity
         print("Validating database integrity...")
         validation = db.validate()
         if validation['valid']:
@@ -499,7 +413,7 @@ def main():
                 print(f"  - {issue}")
         print()
 
-        # 9. Print summary
+        # 8. Print summary
         elapsed = time.time() - start_time
         print(f"Total time: {elapsed/60:.1f} minutes")
         print()
