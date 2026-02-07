@@ -104,24 +104,18 @@ def backup_filtered_signals() -> str:
 
 
 
-def compute_signal_correlation_and_rankings(filtered_name, signal_data, alpha_df, dates, isins,
-                                            date_to_idx, isin_to_idx, rankings, kept_signal_names):
+def compute_signal_correlation(signal_data, alpha_df, dates, isins):
     """
-    Compute correlation with forward IR and rankings for a single filtered signal.
+    Check if a signal passes the correlation threshold with forward IR.
 
     Args:
-        filtered_name: Name of filtered signal
         signal_data: Numpy array of signal values (dates × ISINs)
         alpha_df: Forward IR DataFrame
         dates: Date index
         isins: ISIN list
-        date_to_idx: Date to index mapping
-        isin_to_idx: ISIN to index mapping
-        rankings: Ranking matrix (mutable - updated in place)
-        kept_signal_names: List of kept signal names (mutable - appended to)
 
     Returns:
-        True if signal passed correlation filter, False otherwise
+        True if |correlation| >= CORRELATION_THRESHOLD, False otherwise
     """
     # Convert to DataFrame
     df_signal = pd.DataFrame(signal_data, index=dates, columns=isins)
@@ -144,13 +138,39 @@ def compute_signal_correlation_and_rankings(filtered_name, signal_data, alpha_df
     if mask.sum() < 2:
         return False
 
-    correlation = float(np.corrcoef(signal_vals[mask], ir_vals[mask])[0, 1])
-
-    if abs(correlation) < CORRELATION_THRESHOLD:
+    try:
+        correlation = float(np.corrcoef(signal_vals[mask], ir_vals[mask])[0, 1])
+    except (ValueError, RuntimeWarning):
         return False
 
-    # Signal passed filter - compute and add rankings
-    feat_idx = len(kept_signal_names)  # Current feature index
+    return abs(correlation) >= CORRELATION_THRESHOLD
+
+
+def _add_rankings_for_signal(filtered_name, signal_data, alpha_df, dates, isins,
+                             date_to_idx, isin_to_idx, rankings, feat_idx):
+    """
+    Compute and add rankings for a single filtered signal at a pre-assigned feature index.
+
+    **Thread-Safe**: Uses pre-allocated feat_idx (no shared state modification).
+
+    Args:
+        filtered_name: Name of filtered signal
+        signal_data: Numpy array of signal values (dates × ISINs)
+        alpha_df: Forward IR DataFrame
+        dates: Date index
+        isins: ISIN list
+        date_to_idx: Date to index mapping
+        isin_to_idx: ISIN to index mapping
+        rankings: Ranking matrix (mutable - updated in place)
+        feat_idx: Pre-allocated feature index (immutable)
+    """
+    # Convert to DataFrame
+    df_signal = pd.DataFrame(signal_data, index=dates, columns=isins)
+
+    # Get common dates with IR data
+    daily_ir = alpha_df.groupby('date')['forward_ir'].mean()
+    daily_ir.index = pd.to_datetime(daily_ir.index)
+    common_dates = pd.Index(df_signal.index).intersection(pd.Index(daily_ir.index))
 
     for date in common_dates:
         if date not in date_to_idx:
@@ -171,14 +191,11 @@ def compute_signal_correlation_and_rankings(filtered_name, signal_data, alpha_df
         else:
             rank_vals = pd.Series(values).rank(pct=True).values
 
-        # Fill matrix
+        # Fill matrix at pre-allocated index
         for isin, rank_val in zip(isins, rank_vals):
             if isin in isin_to_idx and not np.isnan(rank_val):
                 isin_idx = isin_to_idx[isin]
                 rankings[date_idx, isin_idx, feat_idx] = rank_val
-
-    kept_signal_names.append(filtered_name)
-    return True
 
 
 def parse_args():
@@ -214,12 +231,15 @@ def parse_args():
 
 def save_worker(save_queue: Queue, signal_db: SignalDatabase, dates, isins, stats: dict,
                 alpha_df=None, date_to_idx=None, isin_to_idx=None, rankings=None,
-                kept_signal_names=None, stats_lock=None):
+                feat_idx_map=None, stats_lock=None):
     """
     Worker thread for parallel parquet saving with inline correlation computation.
 
     Reads (filtered_name, filtered_data) from queue, saves to disk, and computes
     correlation + rankings inline (while signal is in memory).
+
+    **Thread-Safe Design**: Uses pre-allocated feature indices (feat_idx_map) to eliminate
+    shared mutable state. No synchronization needed on ranking matrix updates.
     """
     while True:
         item = save_queue.get()
@@ -238,11 +258,13 @@ def save_worker(save_queue: Queue, signal_db: SignalDatabase, dates, isins, stat
             )
 
             # INLINE: Check correlation with forward IR and build rankings (while signal in memory)
-            if alpha_df is not None and rankings is not None:
-                compute_signal_correlation_and_rankings(
-                    filtered_name, filtered_data, alpha_df, dates, isins,
-                    date_to_idx, isin_to_idx, rankings, kept_signal_names
-                )
+            if alpha_df is not None and rankings is not None and feat_idx_map is not None:
+                if filtered_name in feat_idx_map:
+                    feat_idx = feat_idx_map[filtered_name]
+                    _add_rankings_for_signal(
+                        filtered_name, filtered_data, alpha_df, dates, isins,
+                        date_to_idx, isin_to_idx, rankings, feat_idx
+                    )
 
             # Thread-safe stats update
             if stats_lock:
@@ -339,6 +361,20 @@ def main():
     memory_gb = sum(arr.nbytes for arr in signal_bases.values()) / 1e9
     print(f"  Loaded {len(signal_bases)} signals in {load_time:.1f}s ({memory_gb:.2f} GB in memory)")
 
+    # Pre-allocate feature indices for all filtered signals (DETERMINISTIC)
+    print("\nPre-allocating feature indices...")
+    feat_idx_map = {}
+    all_filtered_signal_names = []
+
+    # Generate all filtered signal names in deterministic order
+    for base_signal_name in sorted(signal_bases.keys()):
+        for window in savgol_windows:
+            for polyorder in savgol_polyorders:
+                filtered_name = f"{base_signal_name}__savgol_{window}d_polyorder_{polyorder}"
+                all_filtered_signal_names.append(filtered_name)
+
+    print(f"  Pre-computed {len(all_filtered_signal_names)} signal names in deterministic order")
+
     # Initialize ranking matrix components BEFORE starting parallel workers
     print("\nPreparing ranking matrix components...")
     alpha_df = None
@@ -360,11 +396,16 @@ def main():
         isin_list_unique = sorted(alpha_df['isin'].unique())
         isin_to_idx = {isin: idx for idx, isin in enumerate(isin_list_unique)}
 
-        # Initialize ranking matrix (will trim after loop)
-        # Estimate: using total_combinations as upper bound, will trim after filtering
-        rankings = np.full((len(target_dates), len(isin_list_unique), total_combinations), np.nan, dtype=np.float32)
+        # Initialize ranking matrix: allocate space for ALL filtered signals
+        # Will trim to only signals that passed correlation filter after loop
+        rankings = np.full((len(target_dates), len(isin_list_unique), len(all_filtered_signal_names)), np.nan, dtype=np.float32)
         print(f"  Ranking matrix initialized: {rankings.shape} (will trim after filtering)")
-        stats_lock = Lock()  # For thread-safe list operations
+
+        # Create feature index map: signal_name -> index
+        for idx, signal_name in enumerate(all_filtered_signal_names):
+            feat_idx_map[signal_name] = idx
+
+        stats_lock = Lock()  # For thread-safe stats updates only
     else:
         print(f"  WARNING: Forward IR not found at {alpha_file}")
         print("  Skipping ranking matrix creation. Run Step 1 first if needed.")
@@ -380,7 +421,7 @@ def main():
     for _ in range(args.workers):
         t = Thread(target=save_worker, args=(save_queue, signal_db, dates, isins, stats,
                                              alpha_df, date_to_idx, isin_to_idx, rankings,
-                                             kept_signal_names, stats_lock))
+                                             feat_idx_map, stats_lock))
         t.daemon = True
         t.start()
         save_threads.append(t)
@@ -409,8 +450,18 @@ def main():
                     filtered_3d = causal_savgol(base_3d, window, polyorder)
                     filtered_data = filtered_3d[0, :, :]  # Extract back to 2D (n_time, n_etfs)
 
-                    # Queue for parallel saving
-                    save_queue.put((filtered_name, filtered_data))
+                    # Check correlation BEFORE queueing (deterministic filtering)
+                    passes_filter = True
+                    if alpha_df is not None:
+                        passes_filter = compute_signal_correlation(
+                            filtered_data, alpha_df, dates, list(isins)
+                        )
+
+                    if passes_filter:
+                        # Queue for parallel saving only if signal passed filter
+                        save_queue.put((filtered_name, filtered_data))
+                        kept_signal_names.append(filtered_name)  # Track for final output
+
                 except Exception as e:
                     print(f"  Error applying Savgol to {filtered_name}: {e}")
 
@@ -450,8 +501,9 @@ def main():
     if rankings is not None and len(kept_signal_names) > 0:
         print("\nSaving ranking matrix...")
 
-        # Trim rankings to only kept signals
-        rankings = rankings[:, :, :len(kept_signal_names)]
+        # Trim rankings to only kept signals (using indices from feat_idx_map)
+        kept_indices = sorted([feat_idx_map[name] for name in kept_signal_names])
+        rankings_trimmed = rankings[:, :, kept_indices]
 
         # Save ranking matrix
         matrix_file = DATA_DIR / 'rankings_matrix_filtered_1month.npz'
@@ -459,7 +511,7 @@ def main():
         target_dates = pd.to_datetime(target_dates)
         np.savez_compressed(
             matrix_file,
-            rankings=rankings,
+            rankings=rankings_trimmed,
             dates=np.array(target_dates),
             isins=np.array(sorted(alpha_df['isin'].unique())),
             features=np.array(kept_signal_names),
@@ -467,7 +519,7 @@ def main():
         )
 
         print(f"  Ranking matrix: {len(kept_signal_names)} signals passed correlation filter (from {stats['count']})")
-        print(f"  Shape: {rankings.shape}")
+        print(f"  Shape: {rankings_trimmed.shape}")
         print(f"  [SAVED] {matrix_file}")
     elif rankings is None:
         print("\nSkipping ranking matrix (forward IR not available)")

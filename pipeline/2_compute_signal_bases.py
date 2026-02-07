@@ -1,25 +1,27 @@
 """
-Step 2: Compute Signal Bases (TEMA-Optimized DPO Variants)
+Step 2: Compute Signal Bases (Savgol-Smoothed DPO Variants)
 ===========================================================
 
 This script:
 1. Loads ETF prices from the database
-2. Computes TEMA-optimized DPO variants with multi-shift exploration
+2. Computes Savgol-smoothed DPO variants with multi-shift exploration
 3. Saves DPO signals to parquet files (each signal saved immediately)
+4. Computes percentile rankings and builds ranking matrix
 
 Features:
-- TEMA-ONLY: Computes DPO variants from library.dpo_enhanced_variants
-  - Explores multiple window periods with TEMA shift divisors
-  - Multiple lag-shift alignments for optimal parameter discovery
+- Savgol-smoothed DPO: Computes DPO variants from library.dpo_enhanced_variants
+  - Periods: 21d, 63d (bi-scale momentum)
+  - Shift divisors: 1.0 (responsive), 2.0 (conservative)
+  - Total: 4 signal variants
 - FULL recomputation: Always recomputes from scratch to ensure fresh data
 - Price corrections captured: Any database updates are reflected
 - Fresh rolling windows: All calculations use current data
 - No look-ahead bias: Signal computation only uses historical price data
-- GPU-accelerated: Uses optimized implementations from signal_filters
+- GPU-accelerated Savgol: Uses optimized implementations from signal_filters
 
 Outputs:
-- pipeline copy/data/signals/    Contains TEMA-optimized DPO parquet files (~350-450 after filters)
-- pipeline copy/data/rankings_matrix_signal_bases_1month.npz  Ranking matrix for features
+- data/signals/    Contains 4 DPO parquet files (one per variant)
+- data/rankings_matrix_signal_bases_1month.npz  Ranking matrix with Z-score percentile ranks
 
 Usage:
   python 2_compute_signal_bases.py                     # All data (2009-09-25 to today)
@@ -52,7 +54,6 @@ DATA_DIR = PIPELINE_DIR / 'data'
 
 # Configuration
 N_CORES = max(1, cpu_count() - 1)
-CORRELATION_THRESHOLD = 0.0
 
 
 def backup_signal_bases() -> str:
@@ -94,55 +95,28 @@ def backup_signal_bases() -> str:
     return str(backup_date_dir)
 
 
-def compute_signal_correlation_and_rankings(signal_name, signal_data, alpha_df, dates, isins,
-                                            date_to_idx, isin_to_idx, rankings, kept_signal_names):
+def add_signal_to_rankings(signal_name, signal_data, dates, isins,
+                          date_to_idx, isin_to_idx, rankings, kept_signal_names):
     """
-    Compute correlation with forward IR and rankings for a single signal base.
+    Compute percentile rankings for a signal and add to ranking matrix.
 
     Args:
         signal_name: Name of signal
         signal_data: Numpy array of signal values (dates × ISINs)
-        alpha_df: Forward IR DataFrame
         dates: Date index
         isins: ISIN list
         date_to_idx: Date to index mapping
         isin_to_idx: ISIN to index mapping
         rankings: Ranking matrix (mutable - updated in place)
         kept_signal_names: List of kept signal names (mutable - appended to)
-
-    Returns:
-        True if signal passed correlation filter, False otherwise
     """
     # Convert to DataFrame
     df_signal = pd.DataFrame(signal_data, index=dates, columns=isins)
 
-    # Get daily IR values
-    daily_ir = alpha_df.groupby('date')['forward_ir'].mean()
-    daily_ir.index = pd.to_datetime(daily_ir.index)
+    # Current feature index
+    feat_idx = len(kept_signal_names)
 
-    # Find common dates
-    common_dates = pd.Index(df_signal.index).intersection(pd.Index(daily_ir.index))
-
-    if len(common_dates) < 2:
-        return False
-
-    # Check correlation with forward IR
-    signal_vals = df_signal.loc[common_dates].values.flatten()
-    ir_vals = np.repeat(daily_ir.loc[common_dates].values, len(isins))
-    mask = ~(np.isnan(signal_vals) | np.isnan(ir_vals))
-
-    if mask.sum() < 2:
-        return False
-
-    correlation = float(np.corrcoef(signal_vals[mask], ir_vals[mask])[0, 1])
-
-    if abs(correlation) < CORRELATION_THRESHOLD:
-        return False
-
-    # Signal passed filter - compute and add rankings
-    feat_idx = len(kept_signal_names)  # Current feature index
-
-    for date in common_dates:
+    for date in df_signal.index:
         if date not in date_to_idx:
             continue
 
@@ -168,7 +142,6 @@ def compute_signal_correlation_and_rankings(signal_name, signal_data, alpha_df, 
                 rankings[date_idx, isin_idx, feat_idx] = rank_val
 
     kept_signal_names.append(signal_name)
-    return True
 
 
 def compute_and_save_signal_bases(
@@ -316,10 +289,10 @@ def compute_and_save_signal_bases(
         )
         n_records += records
 
-        # INLINE: Check correlation with forward IR and build rankings (while signal in memory)
-        if alpha_df is not None and rankings is not None:
-            compute_signal_correlation_and_rankings(
-                signal_name, signal_2d, alpha_df, save_dates, isin_list,
+        # INLINE: Compute rankings for this signal (while signal in memory)
+        if rankings is not None:
+            add_signal_to_rankings(
+                signal_name, signal_2d, save_dates, isin_list,
                 date_to_idx, isin_to_idx, rankings, kept_signal_names
             )
 
@@ -373,13 +346,13 @@ def compute_and_save_signal_bases(
             n_filtered=len(kept_signal_names)
         )
 
-        print(f"  Ranking matrix: {len(kept_signal_names)} signals passed correlation filter (from {n_signals})")
+        print(f"  Ranking matrix: {len(kept_signal_names)} signals included")
         print(f"  Shape: {rankings.shape}")
         print(f"  [SAVED] {matrix_file}")
     elif rankings is None:
         print("\nSkipping ranking matrix (forward IR not available)")
     elif len(kept_signal_names) == 0:
-        print("\nNo signals passed correlation filter for ranking matrix")
+        print("\nNo signals to create ranking matrix")
 
     print("=" * 120)
 
