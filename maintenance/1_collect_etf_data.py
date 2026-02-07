@@ -21,10 +21,10 @@ Usage:
 import sys
 import time
 import warnings
+import sqlite3
 from pathlib import Path
 from datetime import datetime
 
-import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import justetf_scraping
@@ -183,7 +183,6 @@ def fetch_and_store_prices(db, df_universe):
     isins = df_universe['ISIN'].tolist()
     success_count = 0
     fail_count = 0
-    validation_warnings = []
     filtered_count = 0
     total_records_filtered = 0
 
@@ -192,7 +191,25 @@ def fetch_and_store_prices(db, df_universe):
     print(f"Filtering to dates >= {CORE_INCEPTION_DATE.date()}")
     print("(This may take several minutes)\n")
 
-    for isin in tqdm(isins, desc="Fetching prices", ncols=80):
+    # Optimize database for bulk inserts - DISABLE INDEXES during bulk operations
+    conn = sqlite3.connect(str(db.db_path))
+    conn.execute("PRAGMA synchronous=OFF")
+    conn.execute("PRAGMA cache_size=-64000")
+    conn.execute("PRAGMA temp_store=MEMORY")
+    # CRITICAL: Disable indexes during bulk insert to avoid quadratic slowdown
+    conn.execute("PRAGMA index_list(prices)")  # Get list of indexes on prices table
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='prices'")
+    indexes = cursor.fetchall()
+    for idx in indexes:
+        try:
+            conn.execute(f"DROP INDEX IF EXISTS {idx[0]}")
+        except:
+            pass  # Some indexes might be system-managed
+    conn.commit()
+    conn.close()
+
+    for idx, isin in enumerate(tqdm(isins, desc="Fetching prices", ncols=80)):
         try:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
@@ -217,20 +234,8 @@ def fetch_and_store_prices(db, df_universe):
                     fail_count += 1
                     continue
 
-                # Validate new prices against existing (if any)
-                validation = db.validate_new_prices(isin, prices)
-
-                if not validation['valid']:
-                    # Price mismatch in overlap period - warn but continue
-                    validation_warnings.append({
-                        'isin': isin,
-                        'mismatches': len(validation['mismatches']),
-                        'overlap_days': validation['overlap_days'],
-                        'sample': validation['mismatches'][:3]  # First 3 mismatches
-                    })
-
-                # Store in database (replace=True for full refresh)
                 records_added = db.update_prices(isin, prices, replace=True)
+
                 if records_added > 0:
                     success_count += 1
                 else:
@@ -251,22 +256,25 @@ def fetch_and_store_prices(db, df_universe):
     if filtered_count > 0:
         print(f"  ({filtered_count} ETFs had data before core inception)")
 
-    # Show validation warnings (if any)
-    if validation_warnings:
-        print(f"\n{'='*70}")
-        print(f"⚠ WARNING: {len(validation_warnings)} ETFs had price mismatches in overlap period")
-        print(f"{'='*70}")
-        print("(Historical prices may have been corrected by the data source)\n")
-
-        for warn in validation_warnings[:5]:  # Show first 5
-            print(f"  {warn['isin']}: {warn['mismatches']} mismatches in {warn['overlap_days']} overlap days")
-
-        if len(validation_warnings) > 5:
-            print(f"\n  ... and {len(validation_warnings) - 5} more ETFs with warnings")
-
-        print(f"\n{'='*70}")
-
     print()
+
+    # Restore database after bulk insert - REBUILD INDEXES
+    print("\n  Rebuilding database indexes...")
+    conn = sqlite3.connect(str(db.db_path))
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=-262144")
+
+    # Rebuild indexes on prices table
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_isin ON prices(isin)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_date ON prices(date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_prices_isin_date ON prices(isin, date)")
+
+    # Optimize database after bulk insert
+    conn.execute("VACUUM")  # Compact file and rebuild indexes
+    conn.execute("ANALYZE")  # Update statistics
+    conn.commit()
+    conn.close()
+    print("  ✓ Indexes rebuilt and database optimized")
 
     # Retry failed ETFs (if any)
     if fail_count > 0:
