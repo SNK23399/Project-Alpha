@@ -93,7 +93,7 @@ class PriceFetcher:
         Fetch OHLC data for a single ETF.
 
         Args:
-            vwd_id: DEGIRO vwdId for the ETF
+            vwd_id: DEGIRO vwdId for the ETF (numeric issueid or vwdkey format like "IE00B4L5Y983.TRADE,E")
             period: Time period to fetch (default: 5 years)
             resolution: Data resolution (default: daily)
 
@@ -107,12 +107,20 @@ class PriceFetcher:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
 
+                # Detect if this is a vwdkey format (e.g., "IE00B4L5Y983.TRADE,E") or numeric issueid
+                if '.' in vwd_id or ',' in vwd_id:
+                    # vwdkey format (contains ISIN with dots or exchange suffix with comma)
+                    series_str = f"ohlc:vwdkey:{vwd_id}"
+                else:
+                    # Numeric issueid format
+                    series_str = f"ohlc:issueid:{vwd_id}"
+
                 chart_request = ChartRequest(
                     culture="en-US",
                     period=period,
                     requestid="1",
                     resolution=resolution,
-                    series=[f"ohlc:issueid:{vwd_id}"],
+                    series=[series_str],
                     tz="Europe/Amsterdam",
                 )
 
